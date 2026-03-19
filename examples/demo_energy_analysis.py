@@ -40,7 +40,7 @@ def main():
 
     if args.plot:
         import matplotlib; matplotlib.use('Agg')
-        from raptor.viz_airspace import plot_stall_envelope
+        from raptor.visualization import plot_stall_envelope
         fig = plot_stall_envelope(ac, save_path='demo_stall_envelope.png')
         print("\nSaved demo_stall_envelope.png")
 

@@ -18,9 +18,12 @@ from raptor.dem import DEMInterface
 from raptor.config import UAVConfig, MissionConstraints
 from raptor.energy import AircraftEnergyParams
 from raptor.airspace import build_airspace
-from raptor.scenarios import build_scenario_catalog, list_scenarios
+from raptor.scenarios import build_scenario_catalog, list_scenarios, ALL_FACILITIES
 from raptor.mission_planner import MissionPlanner
-from raptor.viz_airspace import plot_mission_soc
+from raptor.visualization import (
+    plot_mission_soc, plot_airspace_map, plot_stall_envelope,
+    plot_path_2d, plot_path_3d, plot_energy_profile,
+)
 
 
 def find_dem():
@@ -50,6 +53,20 @@ def main():
     planner = MissionPlanner(dem, uav, constraints, ac, airspace=airspace)
     catalog = build_scenario_catalog()
     os.makedirs(args.fig_dir, exist_ok=True)
+
+    # Global figures (generated once, independent of scenario runs)
+    if args.plot:
+        fig = plot_airspace_map(dem, airspace, facilities=ALL_FACILITIES,
+            title='Quito DMQ — RDAC 101 Airspace Restrictions',
+            lat_range=(-0.40, 0.06), lon_range=(-78.60, -78.35),
+            save_path=f'{args.fig_dir}/airspace_overview.png', figsize=(11, 9))
+        plt.close(fig)
+        print(f"Saved airspace_overview.png")
+
+        fig = plot_stall_envelope(ac,
+            save_path=f'{args.fig_dir}/stall_envelope.png')
+        plt.close(fig)
+        print(f"Saved stall_envelope.png")
 
     scenario_ids = args.scenarios or list(catalog.keys())
     print(f"\nRunning {len(scenario_ids)} scenarios: {scenario_ids}")
@@ -99,6 +116,41 @@ def main():
                     save_path=f'{args.fig_dir}/{sid}_soc_profile.png')
                 plt.close(fig)
                 print(f"  Saved {sid}_soc_profile.png")
+
+                # Path 2D/3D and per-leg energy profiles
+                leg_paths = {
+                    f"Leg {i+1}: {lr.routed_path.origin.short_name}"
+                    f"→{lr.routed_path.destination.short_name}":
+                    lr.routed_path.flight_path
+                    for i, lr in enumerate(best.legs)
+                }
+                leg_facs = list({
+                    fac
+                    for lr in best.legs
+                    for fac in (lr.routed_path.origin, lr.routed_path.destination)
+                })
+
+                fig = plot_path_2d(dem, leg_paths, facilities=leg_facs,
+                    title=f'{sid}: {scenario.name} — 2D Route',
+                    save_path=f'{args.fig_dir}/{sid}_paths_2d.png')
+                plt.close(fig)
+                print(f"  Saved {sid}_paths_2d.png")
+
+                fig = plot_path_3d(dem, leg_paths,
+                    title=f'{sid}: {scenario.name} — 3D Route',
+                    save_path=f'{args.fig_dir}/{sid}_paths_3d.png')
+                plt.close(fig)
+                print(f"  Saved {sid}_paths_3d.png")
+
+                for i, lr in enumerate(best.legs):
+                    leg_lbl = (f"{lr.routed_path.origin.short_name}"
+                               f"→{lr.routed_path.destination.short_name}")
+                    fig = plot_energy_profile(
+                        lr.energy_result,
+                        title=f'{sid} Leg {i+1}: {leg_lbl} — Energy & SOC',
+                        save_path=f'{args.fig_dir}/{sid}_leg{i+1}_energy.png')
+                    plt.close(fig)
+                    print(f"  Saved {sid}_leg{i+1}_energy.png")
 
     print(f"\n{'='*80}\nAll scenarios completed in {time.time()-t0:.0f}s")
 

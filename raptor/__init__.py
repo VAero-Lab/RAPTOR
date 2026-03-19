@@ -71,6 +71,11 @@ from .visualization import (
     plot_convergence, plot_path_2d, plot_path_3d,
     plot_path_evolution, plot_energy_profile,
     plot_pareto_front, plot_scenario_dashboard,
+    plot_airspace_map, plot_path_vs_ceiling,
+    plot_topology_comparison, plot_constraint_budget,
+    plot_mission_soc, plot_stall_envelope,
+    plot_three_path_comparison, plot_vehicle_comparison,
+    plot_astar_vs_de, plot_all,
 )
 
 __version__ = "0.4.0"
@@ -101,4 +106,10 @@ __all__ = [
     "plot_convergence", "plot_path_2d", "plot_path_3d",
     "plot_path_evolution", "plot_energy_profile",
     "plot_pareto_front", "plot_scenario_dashboard",
+    "plot_airspace_map", "plot_path_vs_ceiling",
+    "plot_topology_comparison", "plot_constraint_budget",
+    "plot_mission_soc", "plot_stall_envelope",
+    "plot_three_path_comparison", "plot_vehicle_comparison",
+    "plot_astar_vs_de", "plot_all",
 ]
+

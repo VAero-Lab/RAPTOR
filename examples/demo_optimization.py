@@ -32,6 +32,7 @@ def main():
     parser.add_argument('--popsize', type=int, default=12)
     parser.add_argument('--plot', action='store_true', default=True)
     parser.add_argument('--no-plot', dest='plot', action='store_false')
+    parser.add_argument('--fig-dir', type=str, default='demo_opt_figures')
     args = parser.parse_args()
 
     print("=== Demo: Optimization with Airspace ===\n")
@@ -45,37 +46,65 @@ def main():
     orig = FacilityNode('H.Espejo', -0.2000, -78.4930, 2788.0)
     dest = FacilityNode('CS.Conocoto', -0.3080, -78.4710, 2510.0)
 
-    # Baseline
+    # A. Baseline (straight, no optimization)
     fp_base = builder.build(orig, dest, PathStrategy.HIGH_OVERFLY)
     e_base = analyze_path_energy(fp_base, ac)
     ar_base = airspace.check_path(fp_base)
 
-    # Optimized with RDAC 101
+    # B. Optimized without airspace (N=0)
+    print("  B. Optimizing direct (no airspace)...", end=" ", flush=True)
+    rp_direct = RoutedPath(orig, dest, dem, uav, constraints, n_intermediate=0)
+    optimizer.optimize_routed(rp_direct, mode=OptMode.ENERGY, payload_kg=1.5,
+        airspace=None, maxiter=args.maxiter, popsize=args.popsize,
+        verbose=False, seed=42)
+    e_direct = analyze_path_energy(rp_direct.flight_path, ac)
+    ar_direct = airspace.check_path(rp_direct.flight_path)
+    print(f"E={e_direct.total_energy_wh:.0f}Wh, AirV={ar_direct.n_violations}")
+
+    # C. Optimized with RDAC 101 (N=1)
+    print("  C. Optimizing with RDAC 101...", end=" ", flush=True)
     rp = RoutedPath(orig, dest, dem, uav, constraints, n_intermediate=1)
     r = optimizer.optimize_routed(rp, mode=OptMode.ENERGY, payload_kg=1.5,
         airspace=airspace, maxiter=args.maxiter, popsize=args.popsize,
-        verbose=True, seed=42)
+        verbose=False, seed=42)
     e_opt = analyze_path_energy(rp.flight_path, ac)
     ar_opt = airspace.check_path(rp.flight_path)
     topo = rp.topology_summary()
+    print(f"E={e_opt.total_energy_wh:.0f}Wh, AirV={ar_opt.n_violations}")
 
-    print(f"\n{'Metric':<25s} | {'Baseline':>10s} | {'Optimized':>10s}")
-    print("-" * 50)
-    print(f"{'Energy [Wh]':<25s} | {e_base.total_energy_wh:10.0f} | {e_opt.total_energy_wh:10.0f}")
-    print(f"{'Time [min]':<25s} | {e_base.total_time/60:10.1f} | {e_opt.total_time/60:10.1f}")
-    print(f"{'Airspace violations':<25s} | {ar_base.n_violations:10d} | {ar_opt.n_violations:10d}")
-    print(f"{'Lateral deviation [m]':<25s} | {'0':>10s} | {topo['max_lateral_deviation_m']:10.0f}")
+    print(f"\n{'Metric':<25s} | {'Baseline':>10s} | {'Direct opt':>10s} | {'RDAC opt':>10s}")
+    print("-" * 62)
+    print(f"{'Energy [Wh]':<25s} | {e_base.total_energy_wh:10.0f} | {e_direct.total_energy_wh:10.0f} | {e_opt.total_energy_wh:10.0f}")
+    print(f"{'Time [min]':<25s} | {e_base.total_time/60:10.1f} | {e_direct.total_time/60:10.1f} | {e_opt.total_time/60:10.1f}")
+    print(f"{'Airspace violations':<25s} | {ar_base.n_violations:10d} | {ar_direct.n_violations:10d} | {ar_opt.n_violations:10d}")
+    print(f"{'Lateral deviation [m]':<25s} | {'0':>10s} | {'0':>10s} | {topo['max_lateral_deviation_m']:10.0f}")
 
     if args.plot:
         import matplotlib; matplotlib.use('Agg')
-        from raptor.viz_airspace import plot_three_path_comparison
-        fig = plot_three_path_comparison(
-            dem, airspace, orig, dest,
-            fp_base, fp_base, rp.flight_path,  # straight = direct for 2-col
-            rp_rdac=rp, e_straight=e_base, e_direct=e_base, e_rdac=e_opt,
-            title='Demo: Baseline vs RDAC-Optimized',
-            save_path='demo_optimization.png')
-        print("\nSaved demo_optimization.png")
+        from raptor.visualization import plot_all
+        paths = {
+            'Baseline': fp_base,
+            'Direct (opt)': rp_direct.flight_path,
+            'RDAC (opt)': rp.flight_path,
+        }
+        figs = plot_all(
+            dem=dem, paths=paths, facilities=[orig, dest],
+            energy_results=[e_base, e_direct, e_opt],
+            opt_results=[r] if r else None,
+            ac=ac, airspace=airspace,
+            orig=orig, dest=dest,
+            fp_straight=fp_base,
+            fp_direct=rp_direct.flight_path,
+            fp_rdac=rp.flight_path,
+            rp_direct=rp_direct, rp_rdac=rp,
+            e_straight=e_base, e_direct=e_direct, e_rdac=e_opt,
+            save_dir=args.fig_dir,
+            title_prefix="Demo: ",
+        )
+        import matplotlib.pyplot as plt
+        for fig in figs.values():
+            plt.close(fig)
+        print(f"\nSaved {len(figs)} figures to {args.fig_dir}/: {list(figs.keys())}")
 
 if __name__ == '__main__':
     main()

@@ -145,10 +145,12 @@ def main():
     # ═══════════════════════════════════════════════════════
     if args.plot:
         os.makedirs(args.fig_dir, exist_ok=True)
-        from raptor.viz_airspace import (
+        from raptor.visualization import (
             plot_airspace_map, plot_stall_envelope, plot_mission_soc,
             plot_constraint_budget, plot_three_path_comparison,
             plot_vehicle_comparison, plot_astar_vs_de,
+            plot_path_2d, plot_path_3d, plot_energy_profile,
+            plot_path_vs_ceiling, plot_topology_comparison,
         )
 
         print(f"\nGenerating figures in {args.fig_dir}/...")
@@ -195,6 +197,42 @@ def main():
             title="A* Grid vs DE Continuous (RDAC 101, incl. VTOL phases)",
             save_path=f'{args.fig_dir}/fig07_astar_vs_de.png')
         plt.close(fig); print("  ✓ fig07_astar_vs_de.png")
+
+        all_paths = {
+            'Straight': fp_s,
+            'Direct (opt)': rp_d.flight_path,
+            'RDAC (opt)': rp_r.flight_path,
+        }
+        facilities = [orig, dest]
+
+        fig = plot_path_2d(dem, all_paths, facilities=facilities,
+            title='Espejo → Conocoto: Flight Paths over DEM',
+            save_path=f'{args.fig_dir}/fig08_path_2d.png')
+        plt.close(fig); print("  ✓ fig08_path_2d.png")
+
+        fig = plot_path_3d(dem, all_paths,
+            title='Espejo → Conocoto: 3D Flight Paths over DEM',
+            save_path=f'{args.fig_dir}/fig09_path_3d.png')
+        plt.close(fig); print("  ✓ fig09_path_3d.png")
+
+        for i, (lbl, er) in enumerate([
+                ('straight', e_s), ('direct', e_d), ('rdac', e_r)], 10):
+            fig = plot_energy_profile(er,
+                title=f'Energy & SOC Profile — {lbl.capitalize()}',
+                save_path=f'{args.fig_dir}/fig{i:02d}_energy_{lbl}.png')
+            plt.close(fig); print(f"  ✓ fig{i:02d}_energy_{lbl}.png")
+
+        fig = plot_path_vs_ceiling(dem, airspace, all_paths,
+            title='Espejo → Conocoto: Flight Profile with Regulatory Ceiling',
+            save_path=f'{args.fig_dir}/fig13_path_vs_ceiling.png')
+        plt.close(fig); print("  ✓ fig13_path_vs_ceiling.png")
+
+        fig = plot_topology_comparison(
+            dem, airspace, rp_d.flight_path, rp_r.flight_path,
+            rp_off=rp_d, rp_on=rp_r, facilities=facilities,
+            title='Topology Change: Airspace OFF vs ON',
+            save_path=f'{args.fig_dir}/fig14_topology_comparison.png')
+        plt.close(fig); print("  ✓ fig14_topology_comparison.png")
 
     print("\nDone.")
 
