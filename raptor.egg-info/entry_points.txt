@@ -1,0 +1,3 @@
+[console_scripts]
+uav-experiments = scripts.run_experiments:main
+uav-scenarios = scripts.run_scenario_catalog:main

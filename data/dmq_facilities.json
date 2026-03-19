@@ -1,0 +1,335 @@
+{
+  "public_hospitals": [
+    {
+      "name": "H. Enrique Garcés",
+      "lat": -0.2444,
+      "lon": -78.5411,
+      "type": "Hospital General",
+      "category": "public_hospitals",
+      "elevation": 2906.09463979021
+    },
+    {
+      "name": "H. Pablo Arturo Suárez",
+      "lat": -0.1273,
+      "lon": -78.4977,
+      "type": "Hospital General",
+      "category": "public_hospitals",
+      "elevation": 2823.793868880811
+    },
+    {
+      "name": "H. Docente Calderón",
+      "lat": -0.0921,
+      "lon": -78.4367,
+      "type": "Hospital General",
+      "category": "public_hospitals",
+      "elevation": 2700.854088919301
+    },
+    {
+      "name": "H. Eugenio Espejo",
+      "lat": -0.2144,
+      "lon": -78.4987,
+      "type": "Hospital Especialidades",
+      "category": "public_hospitals",
+      "elevation": 2815.123661884537
+    },
+    {
+      "name": "H. Carlos Andrade Marín (IESS)",
+      "lat": -0.2053,
+      "lon": -78.5047,
+      "type": "Hospital IESS",
+      "category": "public_hospitals",
+      "elevation": 2810.4933691455535
+    },
+    {
+      "name": "IESS Sur",
+      "lat": -0.2578,
+      "lon": -78.5253,
+      "type": "Hospital IESS",
+      "category": "public_hospitals",
+      "elevation": 2817.91338567408
+    },
+    {
+      "name": "H. Militar",
+      "lat": -0.213,
+      "lon": -78.4934,
+      "type": "Hospital Militar",
+      "category": "public_hospitals",
+      "elevation": 2815.6950194340366
+    },
+    {
+      "name": "H. Policía Nacional",
+      "lat": -0.1824,
+      "lon": -78.5046,
+      "type": "Hospital Policía",
+      "category": "public_hospitals",
+      "elevation": 2930.207009207068
+    },
+    {
+      "name": "H. San Bartolo",
+      "lat": -0.2687,
+      "lon": -78.5287,
+      "type": "Hospital Especialidades",
+      "category": "public_hospitals",
+      "elevation": 2850.023237044964
+    },
+    {
+      "name": "H. Nanegalito",
+      "lat": 0.0635,
+      "lon": -78.6793,
+      "type": "Hospital Básico",
+      "category": "public_hospitals",
+      "elevation": NaN
+    },
+    {
+      "name": "SOLCA (Oncológico)",
+      "lat": -0.1371,
+      "lon": -78.4694,
+      "type": "Hospital Especialidades",
+      "category": "public_hospitals",
+      "elevation": 2883.748447204965
+    },
+    {
+      "name": "H. San Juan de Dios (Valles)",
+      "lat": -0.297,
+      "lon": -78.4445,
+      "type": "Hospital Especializado",
+      "category": "public_hospitals",
+      "elevation": 2477.3084864606976
+    }
+  ],
+  "health_centers": [
+    {
+      "name": "CS Guamaní (Tipo C)",
+      "lat": -0.3242,
+      "lon": -78.5493,
+      "type": "Centro Tipo C",
+      "category": "health_centers",
+      "elevation": 3002.5804999935413
+    },
+    {
+      "name": "CS Nº1 Centro Histórico",
+      "lat": -0.2231,
+      "lon": -78.5145,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2830.465031443282
+    },
+    {
+      "name": "CS Nº2",
+      "lat": -0.1897,
+      "lon": -78.5072,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2917.098158598169
+    },
+    {
+      "name": "CS Nº3 Itchimbía",
+      "lat": -0.2244,
+      "lon": -78.5054,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2807.9894242071964
+    },
+    {
+      "name": "CS La Vicentina",
+      "lat": -0.2179,
+      "lon": -78.4848,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2756.033606229269
+    },
+    {
+      "name": "CS Chimbacalle",
+      "lat": -0.2447,
+      "lon": -78.5137,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2840.158882245838
+    },
+    {
+      "name": "CS Lucha de los Pobres",
+      "lat": -0.2855,
+      "lon": -78.5331,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2923.11518446297
+    },
+    {
+      "name": "SCS Magdalena",
+      "lat": -0.239,
+      "lon": -78.5292,
+      "type": "Subcentro",
+      "category": "health_centers",
+      "elevation": 2834.384841363114
+    },
+    {
+      "name": "SCS Nº4 (Napo)",
+      "lat": -0.2439,
+      "lon": -78.5131,
+      "type": "Subcentro",
+      "category": "health_centers",
+      "elevation": 2839.8453209540176
+    },
+    {
+      "name": "SCS Quito Sur",
+      "lat": -0.2598,
+      "lon": -78.5323,
+      "type": "Subcentro",
+      "category": "health_centers",
+      "elevation": 2831.3290634160494
+    },
+    {
+      "name": "CS Chillogallo",
+      "lat": -0.2762,
+      "lon": -78.5532,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2885.295037512342
+    },
+    {
+      "name": "CS San Luis Chillogallo",
+      "lat": -0.2752,
+      "lon": -78.5669,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2967.5669283712637
+    },
+    {
+      "name": "CS MSP Cotocollao",
+      "lat": -0.1053,
+      "lon": -78.4963,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2723.8491109362585
+    },
+    {
+      "name": "UMS Centro",
+      "lat": -0.2204,
+      "lon": -78.518,
+      "type": "Unidad Metropolitana",
+      "category": "health_centers",
+      "elevation": 2857.988158727256
+    },
+    {
+      "name": "CS Calacalí",
+      "lat": 0.0,
+      "lon": -78.5151,
+      "type": "Centro Rural",
+      "category": "health_centers",
+      "elevation": 2817.5344068387594
+    },
+    {
+      "name": "CS Nanegal",
+      "lat": 0.1386,
+      "lon": -78.6763,
+      "type": "Centro Rural",
+      "category": "health_centers"
+    },
+    {
+      "name": "CS Lloa",
+      "lat": -0.2477,
+      "lon": -78.5803,
+      "type": "Centro Rural",
+      "category": "health_centers",
+      "elevation": 3059.2621544142994
+    },
+    {
+      "name": "CS Pintag",
+      "lat": -0.3755,
+      "lon": -78.3733,
+      "type": "Centro Rural",
+      "category": "health_centers",
+      "elevation": 2876.517458452225
+    },
+    {
+      "name": "CS Tumbaco",
+      "lat": -0.2158,
+      "lon": -78.4085,
+      "type": "Centro Salud",
+      "category": "health_centers",
+      "elevation": 2330.8549282679983
+    },
+    {
+      "name": "SCS Pifo",
+      "lat": -0.2247,
+      "lon": -78.3371,
+      "type": "Subcentro Rural",
+      "category": "health_centers",
+      "elevation": 2591.928151754227
+    }
+  ],
+  "private_hospitals": [
+    {
+      "name": "H. Metropolitano",
+      "lat": -0.1844,
+      "lon": -78.5037,
+      "type": "Hospital Privado",
+      "category": "private_hospitals",
+      "elevation": 2928.7177916090495
+    },
+    {
+      "name": "H. de los Valles",
+      "lat": -0.2082,
+      "lon": -78.4248,
+      "type": "Hospital Privado",
+      "category": "private_hospitals",
+      "elevation": 2290.4381077207636
+    },
+    {
+      "name": "H. Vozandes",
+      "lat": -0.1728,
+      "lon": -78.4894,
+      "type": "Hospital Privado",
+      "category": "private_hospitals",
+      "elevation": 2789.320708668537
+    },
+    {
+      "name": "H. Americano",
+      "lat": -0.1867,
+      "lon": -78.4947,
+      "type": "Hospital Privado",
+      "category": "private_hospitals",
+      "elevation": 2821.9985537377606
+    },
+    {
+      "name": "H. Capital",
+      "lat": -0.1613,
+      "lon": -78.4761,
+      "type": "Hospital Privado",
+      "category": "private_hospitals",
+      "elevation": 2796.139906509459
+    },
+    {
+      "name": "H. Adventista",
+      "lat": -0.1915,
+      "lon": -78.493,
+      "type": "Hospital Privado",
+      "category": "private_hospitals",
+      "elevation": 2791.258073888513
+    },
+    {
+      "name": "Clínica El Batán",
+      "lat": -0.1654,
+      "lon": -78.4756,
+      "type": "Clínica Privada",
+      "category": "private_hospitals",
+      "elevation": 2786.3680802158724
+    },
+    {
+      "name": "Clínica María Auxiliadora",
+      "lat": -0.135,
+      "lon": -78.4933,
+      "type": "Clínica Privada",
+      "category": "private_hospitals",
+      "elevation": 2816.240034348897
+    },
+    {
+      "name": "Clínica Ntra Sra Guadalupe",
+      "lat": -0.1946,
+      "lon": -78.4947,
+      "type": "Clínica Privada",
+      "category": "private_hospitals",
+      "elevation": 2794.283783783898
+    }
+  ]
+}

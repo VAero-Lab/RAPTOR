@@ -1,0 +1,172 @@
+Metadata-Version: 2.4
+Name: raptor
+Version: 0.0.1
+Summary: Energy-optimal, regulation-aware eVTOL path planning for medical delivery in complex terrain (Quito, Ecuador).
+Home-page: https://github.com/LUAS-EPN/uav-path-planning
+Author: Victor Alulema
+Author-email: victor.alulema@epn.edu.ec
+Keywords: uav,evtol,path-planning,optimization,dem,terrain,airspace,medical-delivery,quito,differential-evolution,energy-model,RDAC-101
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: GIS
+Classifier: Topic :: Scientific/Engineering :: Physics
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy>=1.21
+Requires-Dist: scipy>=1.7
+Requires-Dist: matplotlib>=3.5
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+Requires-Dist: black>=22.0; extra == "dev"
+Requires-Dist: flake8>=5.0; extra == "dev"
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+# RAPTOR v0.0.1
+
+**RAPTOR:** Energy-Optimal **R**egulation-**A**ware **P**ath and **T**rajectory **O**ptimization for **R**otorcraft (eVTOLs, multirotors)
+
+A Python package for 3D flight path optimization over real terrain (DEM) for
+eVTOL/multirotor UAV operations. Supply your own DEM, facility coordinates (pick-up centers, delivery destinations, etc.), and airspace zone
+definitions (restricted zones) to apply it to any region. Includes a complete case study for the
+Quito Metropolitan District, Ecuador (2,850 m ASL).
+
+## Installation
+
+```bash
+pip install -e .    # editable (development)
+pip install .       # standard
+```
+
+**Requirements:** Python >= 3.9, numpy, scipy, matplotlib
+
+## Package Structure
+
+```
+raptor/
+├── setup.py                          # pip install
+├── LICENSE                           # MIT
+├── README.md
+├── data/                             # Region-specific data (replaceable)
+│   ├──TIF_files/                     # TIF files for DEM generation
+│   │ ├──n00_w079_1arc_v3.tif
+│   │ ├──s01_w079_1arc_v3.tif
+│   ├── dmq_dem.npz                   # Quito DEM (30m SRTM)
+│   ├── dmq_facilities.json           # Medical facility coordinates
+│   └── quito_airspace.json           # RDAC 101 airspace zones (11 zones)
+├── raptor/                # Core package (18 modules)
+│   ├── atmosphere.py                 # ISA standard atmosphere
+│   ├── config.py                     # UAV + mission parameters
+│   ├── dem.py                        # DEM interface, haversine, bearing
+│   ├── segments.py                   # 6 flight segment types
+│   ├── path.py                       # FlightPath construction
+│   ├── terrain.py                    # Terrain clearance analysis
+│   ├── builder.py                    # DEM-aware path builder
+│   ├── energy.py                     # Power models + stall detection
+│   ├── airspace.py                   # Generic airspace zone manager
+│   ├── routed_path.py                # Lateral routing + waypoints
+│   ├── optimizer.py                  # DE optimization engine
+│   ├── mission_planner.py            # Multi-leg SOC-coupled orchestration
+│   ├── scenarios.py                  # 8-scenario medical catalog (Quito)
+│   ├── vehicles.py                   # 4 parametric UAV configurations
+│   ├── astar_baseline.py             # A* grid benchmark
+│   ├── visualization.py              # 7 base plot functions
+│   └── viz_airspace.py               # 9 regulation-aware plot functions
+├── scripts/                          # Runner scripts
+│   ├── run_experiments.py            # Experiments + publication figures
+│   └── run_scenario_catalog.py       # Full 8-scenario catalog
+└── examples/                         # Demo scripts
+    ├── demo_path_planning.py         # Basic pipeline
+    ├── demo_energy_analysis.py       # Energy model
+    └── demo_optimization.py          # Optimization with airspace
+```
+
+## Quick Start
+
+```python
+from raptor import *
+from raptor.airspace import load_airspace_from_file
+from raptor.routed_path import RoutedPath
+from raptor.optimizer import PathOptimizer, OptMode
+
+dem = DEMInterface('data/dmq_dem.npz')
+airspace = load_airspace_from_file('data/quito_airspace.json', dem=dem)
+optimizer = PathOptimizer(dem, UAVConfig(), MissionConstraints(), AircraftEnergyParams())
+
+orig = FacilityNode('Hospital', -0.2000, -78.4930, 2788.0)
+dest = FacilityNode('Clinic', -0.3080, -78.4710, 2510.0)
+
+rp = RoutedPath(orig, dest, dem, UAVConfig(), MissionConstraints(), n_intermediate=1)
+result = optimizer.optimize_routed(rp, mode=OptMode.ENERGY, payload_kg=1.5,
+    airspace=airspace, maxiter=200, popsize=20, verbose=True)
+```
+
+## Using Your Own Data
+
+The framework is region-agnostic. To apply it to a different area:
+
+1. **DEM:** Provide a `.npz` file with keys `lat`, `lon`, `elevation` (2D grid)
+2. **Facilities:** JSON with `name`, `lat`, `lon`, `ground_elev` per facility
+3. **Airspace:** JSON file defining restricted zones:
+
+```json
+{
+  "zones": [
+    {
+      "zone_id": "MY_AIRPORT",
+      "zone_type": "aerodrome_ctr",
+      "geometry_type": "circle",
+      "center_lat": 40.6413,
+      "center_lon": -73.7781,
+      "radius_m": 9000,
+      "altitude_ceiling_m": 3000,
+      "is_agl": false,
+      "description": "JFK Airport exclusion zone"
+    }
+  ]
+}
+```
+
+Zone types: `prohibited`, `restricted`, `aerodrome_ctr`, `altitude_limit`,
+`populated_area`, `ecological`, `temporal`
+
+Geometry types: `circle` (center + radius), `polygon` (vertex list), `global` (everywhere)
+
+## Running Scripts
+
+```bash
+# Experiments + 7 publication figures
+python -m scripts.run_experiments --plot --maxiter 200 --popsize 20
+
+# Text tables only (no figures)
+python -m scripts.run_experiments --no-plot
+
+# Full 8-scenario catalog
+python -m scripts.run_scenario_catalog --plot --maxiter 200
+
+# Demos
+python -m examples.demo_path_planning --plot
+python -m examples.demo_energy_analysis --plot
+python -m examples.demo_optimization --plot --maxiter 100
+```
+
+## License
+
+MIT — See LICENSE file.

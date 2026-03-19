@@ -1,0 +1,713 @@
+"""
+Optimization Visualization — Convergence, Paths & DEM Overlays
+================================================================
+
+Provides publication-quality visualizations for:
+    - Optimization convergence curves
+    - Path evolution during optimization (snapshots)
+    - 2D flight path over DEM contour map
+    - 3D flight path over DEM surface
+    - Energy/SOC profiles along optimized paths
+    - Multi-objective Pareto front plots
+    - Scenario comparison dashboards
+
+Author: Victor (EPN / LUAS-EPN)
+"""
+
+from __future__ import annotations
+from typing import List, Dict, Optional, Tuple
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.colors import LightSource
+import matplotlib.patches as mpatches
+
+from .dem import DEMInterface
+from .path import FlightPath
+from .energy import MissionEnergyResult, analyze_path_energy, AircraftEnergyParams
+from .terrain import TerrainAnalyzer
+from .config import MissionConstraints
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STYLE DEFAULTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+_COLORS = {
+    'energy': '#2196F3',
+    'time': '#FF5722',
+    'multi': '#4CAF50',
+    'initial': '#9E9E9E',
+    'terrain': '#795548',
+    'clearance': '#F44336',
+    'feasible': '#4CAF50',
+    'infeasible': '#F44336',
+}
+
+_MODE_COLORS = {
+    'energy': '#2196F3',
+    'time': '#FF5722',
+    'multi': '#4CAF50',
+}
+
+_SEGMENT_COLORS = {
+    'VTOL_ASCEND': '#E91E63',
+    'VTOL_DESCEND': '#9C27B0',
+    'TRANSITION': '#FF9800',
+    'FW_CLIMB': '#2196F3',
+    'FW_CRUISE': '#4CAF50',
+    'FW_DESCEND': '#00BCD4',
+}
+
+plt.rcParams.update({
+    'figure.dpi': 150,
+    'font.size': 9,
+    'axes.titlesize': 11,
+    'axes.labelsize': 9,
+    'legend.fontsize': 8,
+    'figure.facecolor': 'white',
+})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CONVERGENCE PLOTS
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_convergence(
+    results: List,
+    title: str = "Optimization Convergence",
+    save_path: str = None,
+) -> plt.Figure:
+    """
+    Plot convergence curves for one or more optimization results.
+
+    Parameters
+    ----------
+    results : list of OptimizationResult
+        Results from optimizer.optimize() calls.
+    title : str
+        Plot title.
+    save_path : str, optional
+        If provided, save figure to this path.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    # Left: objective convergence
+    ax = axes[0]
+    for res in results:
+        color = _MODE_COLORS.get(res.mode, '#333')
+        label = f"{res.mode.upper()} (w_E={res.weights[0]:.1f})"
+        ax.plot(res.convergence_history, color=color, label=label, linewidth=1.5)
+    ax.set_xlabel("Generation")
+    ax.set_ylabel("Penalized Objective")
+    ax.set_title("Objective Convergence")
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    # Right: energy and time evolution
+    ax2 = axes[1]
+    bar_width = 0.35
+    x = np.arange(len(results))
+
+    # Initial values (same for all since same route)
+    initial_e = [r.initial_energy_wh for r in results]
+    initial_t = [r.initial_time_s / 60 for r in results]
+    final_e = [r.energy_wh for r in results]
+    final_t = [r.flight_time_s / 60 for r in results]
+
+    ax2.bar(x - bar_width/2, initial_e, bar_width, label='Initial Energy',
+            color='#BBDEFB', edgecolor='#1565C0', linewidth=0.5)
+    ax2.bar(x + bar_width/2, final_e, bar_width, label='Optimized Energy',
+            color='#2196F3', edgecolor='#0D47A1', linewidth=0.5)
+    ax2.set_ylabel("Energy [Wh]", color='#2196F3')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([r.mode.upper() for r in results], fontsize=8)
+
+    ax2t = ax2.twinx()
+    ax2t.plot(x, initial_t, 'o--', color='#FFAB91', markersize=6,
+              label='Initial Time')
+    ax2t.plot(x, final_t, 's-', color='#FF5722', markersize=6,
+              label='Optimized Time')
+    ax2t.set_ylabel("Time [min]", color='#FF5722')
+
+    # Combined legend
+    lines1, labels1 = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax2t.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=7)
+    ax2.set_title("Energy & Time Comparison")
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 2D PATH OVER DEM
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_path_2d(
+    dem: DEMInterface,
+    paths: Dict[str, FlightPath],
+    facilities: List = None,
+    title: str = "Flight Paths over DEM",
+    save_path: str = None,
+    show_terrain_profile: bool = True,
+) -> plt.Figure:
+    """
+    Plot flight paths on a 2D DEM contour map with terrain profiles.
+
+    Parameters
+    ----------
+    dem : DEMInterface
+        Terrain model.
+    paths : dict
+        Name → FlightPath mapping (e.g. {'Initial': path0, 'Optimized': path1}).
+    facilities : list of Facility, optional
+        Mark facility locations on the map.
+    """
+    n_cols = 2 if show_terrain_profile else 1
+    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 5.5))
+    if not isinstance(axes, np.ndarray):
+        axes = [axes]
+
+    # ── Left: Plan view (lat/lon contour map) ─────────────────────────────
+    ax = axes[0]
+
+    # Determine crop region from paths
+    all_lats, all_lons = [], []
+    for name, path in paths.items():
+        wp = path.get_waypoints_array()
+        all_lats.extend(wp[:, 0])
+        all_lons.extend(wp[:, 1])
+
+    lat_min, lat_max = min(all_lats), max(all_lats)
+    lon_min, lon_max = min(all_lons), max(all_lons)
+    margin = 0.02
+    lat_min -= margin; lat_max += margin
+    lon_min -= margin; lon_max += margin
+
+    # Crop DEM for display
+    lat_mask = (dem.lat_1d >= lat_min) & (dem.lat_1d <= lat_max)
+    lon_mask = (dem.lon_1d >= lon_min) & (dem.lon_1d <= lon_max)
+    lat_sub = dem.lat_1d[lat_mask]
+    lon_sub = dem.lon_1d[lon_mask]
+    elev_sub = dem.elev_grid[np.ix_(lat_mask, lon_mask)]
+
+    LON, LAT = np.meshgrid(lon_sub, lat_sub)
+
+    # Hillshade-style rendering
+    ls = LightSource(azdeg=315, altdeg=35)
+    rgb = ls.shade(elev_sub, cmap=cm.terrain, blend_mode='soft',
+                   vmin=np.nanmin(elev_sub), vmax=np.nanmax(elev_sub))
+    ax.imshow(rgb, extent=[lon_sub[0], lon_sub[-1], lat_sub[0], lat_sub[-1]],
+              origin='lower', aspect='auto')
+
+    # Contour lines
+    levels = np.arange(
+        np.nanmin(elev_sub) // 100 * 100,
+        np.nanmax(elev_sub) + 200, 200
+    )
+    cs = ax.contour(LON, LAT, elev_sub, levels=levels, colors='k',
+                    linewidths=0.3, alpha=0.4)
+    ax.clabel(cs, inline=True, fontsize=5, fmt='%d')
+
+    # Plot paths
+    colors = list(_MODE_COLORS.values()) + ['#9C27B0', '#FFEB3B', '#795548']
+    for idx, (name, path) in enumerate(paths.items()):
+        wp = path.get_waypoints_array()
+        color = colors[idx % len(colors)]
+        ax.plot(wp[:, 1], wp[:, 0], '-', color=color, linewidth=2,
+                label=name, alpha=0.9)
+        # Start and end markers
+        ax.plot(wp[0, 1], wp[0, 0], 'o', color=color, markersize=8,
+                markeredgecolor='k', markeredgewidth=0.5)
+        ax.plot(wp[-1, 1], wp[-1, 0], 's', color=color, markersize=8,
+                markeredgecolor='k', markeredgewidth=0.5)
+
+    # Facilities
+    if facilities:
+        for fac in facilities:
+            if lat_min <= fac.lat <= lat_max and lon_min <= fac.lon <= lon_max:
+                marker = '^' if fac.is_hangar else 'v'
+                color = '#E91E63' if fac.is_hangar else '#FF9800'
+                ax.plot(fac.lon, fac.lat, marker, color=color, markersize=9,
+                        markeredgecolor='k', markeredgewidth=0.5, zorder=10)
+                ax.annotate(fac.short_name, (fac.lon, fac.lat),
+                           xytext=(5, 5), textcoords='offset points',
+                           fontsize=6, fontweight='bold',
+                           bbox=dict(boxstyle='round,pad=0.2', fc='white',
+                                    alpha=0.7, ec='none'))
+
+    ax.set_xlabel("Longitude [°]")
+    ax.set_ylabel("Latitude [°]")
+    ax.set_title("Plan View (DEM)")
+    ax.legend(fontsize=7, loc='best')
+    ax.grid(True, alpha=0.2)
+
+    # ── Right: Terrain profile ────────────────────────────────────────────
+    if show_terrain_profile and len(axes) > 1:
+        ax2 = axes[1]
+
+        for idx, (name, path) in enumerate(paths.items()):
+            wp = path.get_waypoints_array()
+            dist_km = wp[:, 4] / 1000.0
+            alt = wp[:, 2]
+            color = colors[idx % len(colors)]
+            ax2.plot(dist_km, alt, '-', color=color, linewidth=1.5, label=name)
+
+        # Terrain profile along the first path
+        first_path = list(paths.values())[0]
+        wp0 = first_path.get_waypoints_array()
+        terrain_elevs = dem.elevation_batch(wp0[:, 0], wp0[:, 1])
+        dist_km = wp0[:, 4] / 1000.0
+        ax2.fill_between(dist_km, terrain_elevs, alpha=0.3,
+                        color=_COLORS['terrain'], label='Terrain')
+        ax2.plot(dist_km, terrain_elevs, '-', color=_COLORS['terrain'],
+                linewidth=0.8, alpha=0.7)
+
+        ax2.set_xlabel("Ground Distance [km]")
+        ax2.set_ylabel("Altitude [m AMSL]")
+        ax2.set_title("Altitude Profile")
+        ax2.legend(fontsize=7)
+        ax2.grid(True, alpha=0.3)
+
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 3D PATH OVER DEM
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_path_3d(
+    dem: DEMInterface,
+    paths: Dict[str, FlightPath],
+    title: str = "3D Flight Path over DEM",
+    save_path: str = None,
+    elev_angle: float = 30,
+    azim_angle: float = -60,
+) -> plt.Figure:
+    """
+    Plot flight paths on a 3D DEM surface.
+
+    Parameters
+    ----------
+    dem : DEMInterface
+    paths : dict of name → FlightPath
+    """
+    fig = plt.figure(figsize=(11, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+    # Determine region
+    all_lats, all_lons = [], []
+    for path in paths.values():
+        wp = path.get_waypoints_array()
+        all_lats.extend(wp[:, 0]); all_lons.extend(wp[:, 1])
+
+    margin = 0.015
+    lat_min, lat_max = min(all_lats) - margin, max(all_lats) + margin
+    lon_min, lon_max = min(all_lons) - margin, max(all_lons) + margin
+
+    lat_mask = (dem.lat_1d >= lat_min) & (dem.lat_1d <= lat_max)
+    lon_mask = (dem.lon_1d >= lon_min) & (dem.lon_1d <= lon_max)
+    lat_sub = dem.lat_1d[lat_mask]
+    lon_sub = dem.lon_1d[lon_mask]
+    elev_sub = dem.elev_grid[np.ix_(lat_mask, lon_mask)]
+
+    # Downsample for performance
+    stride = max(1, len(lat_sub) // 80)
+    lat_ds = lat_sub[::stride]
+    lon_ds = lon_sub[::stride]
+    elev_ds = elev_sub[::stride, ::stride]
+
+    LON, LAT = np.meshgrid(lon_ds, lat_ds)
+
+    # Plot terrain surface
+    ls = LightSource(azdeg=315, altdeg=35)
+    facecolors = ls.shade(elev_ds, cmap=cm.terrain, blend_mode='soft',
+                          vmin=np.nanmin(elev_ds), vmax=np.nanmax(elev_ds))
+    ax.plot_surface(LON, LAT, elev_ds, facecolors=facecolors,
+                    rstride=1, cstride=1, antialiased=True,
+                    shade=False, alpha=0.7)
+
+    # Plot flight paths
+    colors = list(_MODE_COLORS.values()) + ['#9C27B0', '#FFEB3B']
+    for idx, (name, path) in enumerate(paths.items()):
+        wp = path.get_waypoints_array()
+        color = colors[idx % len(colors)]
+        ax.plot(wp[:, 1], wp[:, 0], wp[:, 2], '-', color=color,
+                linewidth=2.5, label=name, alpha=0.95)
+
+        # Vertical lines to ground at key points (every 10th)
+        for j in range(0, len(wp), max(1, len(wp) // 10)):
+            terrain_z = dem.elevation(wp[j, 0], wp[j, 1])
+            if not np.isnan(terrain_z):
+                ax.plot([wp[j, 1], wp[j, 1]], [wp[j, 0], wp[j, 0]],
+                       [terrain_z, wp[j, 2]], ':', color=color,
+                       alpha=0.3, linewidth=0.5)
+
+        # Start/end markers
+        ax.scatter([wp[0, 1]], [wp[0, 0]], [wp[0, 2]], c=color,
+                  marker='o', s=60, edgecolors='k', linewidths=0.5, zorder=10)
+        ax.scatter([wp[-1, 1]], [wp[-1, 0]], [wp[-1, 2]], c=color,
+                  marker='s', s=60, edgecolors='k', linewidths=0.5, zorder=10)
+
+    ax.set_xlabel('Longitude [°]', fontsize=8, labelpad=8)
+    ax.set_ylabel('Latitude [°]', fontsize=8, labelpad=8)
+    ax.set_zlabel('Altitude [m]', fontsize=8, labelpad=8)
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    ax.legend(fontsize=7, loc='upper left')
+    ax.view_init(elev=elev_angle, azim=azim_angle)
+
+    plt.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PATH EVOLUTION (SNAPSHOTS DURING OPTIMIZATION)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_path_evolution(
+    dem: DEMInterface,
+    initial_path: FlightPath,
+    opt_result,
+    ac: AircraftEnergyParams,
+    title: str = "Path Evolution During Optimization",
+    save_path: str = None,
+    n_snapshots: int = 6,
+) -> plt.Figure:
+    """
+    Show how the path evolves during optimization.
+
+    Uses parameter snapshots recorded during DE generations.
+    """
+    snapshots = opt_result.parameter_history
+    if len(snapshots) == 0:
+        snapshots = [opt_result.parameter_vector]
+
+    # Select evenly spaced snapshots
+    n = min(n_snapshots, len(snapshots))
+    indices = np.linspace(0, len(snapshots) - 1, n, dtype=int)
+
+    n_rows = 2
+    n_cols = (n + 1) // 2  # +1 for ceiling division
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 7))
+    axes_flat = axes.flatten()
+
+    # Get terrain profile for background
+    wp_init = initial_path.get_waypoints_array()
+    terrain_elevs = dem.elevation_batch(wp_init[:, 0], wp_init[:, 1])
+
+    # Clone path for parameter setting
+    from .optimizer import PathOptimizer
+    cloner = PathOptimizer.__new__(PathOptimizer)
+
+    for panel_idx, snap_idx in enumerate(indices):
+        if panel_idx >= len(axes_flat):
+            break
+        ax = axes_flat[panel_idx]
+
+        theta = snapshots[snap_idx]
+
+        # Reconstruct path with these parameters
+        path_snap = cloner._clone_path(initial_path)
+        try:
+            path_snap.parameter_vector = theta
+            wp = path_snap.get_waypoints_array()
+            dist_km = wp[:, 4] / 1000.0
+
+            # Terrain fill
+            terrain_snap = dem.elevation_batch(wp[:, 0], wp[:, 1])
+            ax.fill_between(dist_km, terrain_snap, alpha=0.3,
+                           color=_COLORS['terrain'])
+            ax.plot(dist_km, terrain_snap, '-', color=_COLORS['terrain'],
+                   linewidth=0.5)
+
+            # Flight path colored by segment type
+            seg_starts = [0]
+            for seg in path_snap.segments:
+                seg_starts.append(seg_starts[-1] + len(seg.waypoints))
+
+            for s_idx, seg in enumerate(path_snap.segments):
+                start = seg_starts[s_idx]
+                end = seg_starts[s_idx + 1]
+                if end > len(dist_km):
+                    end = len(dist_km)
+                color = _SEGMENT_COLORS.get(seg.segment_type.value, '#333')
+                ax.plot(dist_km[start:end], wp[start:end, 2], '-',
+                       color=color, linewidth=1.5)
+
+            gen_num = int(snap_idx / max(len(snapshots)-1, 1) *
+                         opt_result.n_iterations) if len(snapshots) > 1 else opt_result.n_iterations
+            ax.set_title(f"Gen {gen_num}", fontsize=9)
+        except Exception:
+            ax.set_title(f"Snapshot {snap_idx} (error)", fontsize=9)
+
+        ax.set_xlabel("Distance [km]", fontsize=7)
+        ax.set_ylabel("Alt [m]", fontsize=7)
+        ax.tick_params(labelsize=6)
+        ax.grid(True, alpha=0.2)
+
+    # Hide unused panels
+    for i in range(len(indices), len(axes_flat)):
+        axes_flat[i].set_visible(False)
+
+    # Legend
+    patches = [mpatches.Patch(color=c, label=n.replace('_', ' '))
+               for n, c in _SEGMENT_COLORS.items()]
+    fig.legend(handles=patches, loc='lower center', ncol=6, fontsize=7)
+
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+    plt.tight_layout(rect=[0, 0.06, 1, 0.95])
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ENERGY / SOC PROFILE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_energy_profile(
+    energy_result: MissionEnergyResult,
+    title: str = "Energy & SOC Profile",
+    save_path: str = None,
+) -> plt.Figure:
+    """Plot power and SOC profiles along the optimized path."""
+    fig, axes = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
+
+    # ── Power profile ─────────────────────────────────────────────────────
+    ax = axes[0]
+    cum_time = 0
+    for seg in energy_result.segments:
+        t_start = cum_time
+        t_end = cum_time + seg.duration
+        color = _SEGMENT_COLORS.get(seg.segment_type, '#333')
+
+        ax.barh(0, seg.duration, left=t_start, height=seg.P_elec / 1000,
+                color=color, alpha=0.7, edgecolor='k', linewidth=0.3)
+        ax.fill_between([t_start, t_end], 0, seg.P_elec,
+                       color=color, alpha=0.5)
+        ax.plot([t_start, t_end], [seg.P_elec, seg.P_elec],
+               color=color, linewidth=1.5)
+
+        # Label
+        mid_t = (t_start + t_end) / 2
+        if seg.duration > 5:
+            ax.text(mid_t, seg.P_elec + 50, f"{seg.P_elec:.0f}W",
+                   ha='center', va='bottom', fontsize=6, rotation=45)
+
+        cum_time = t_end
+
+    ax.set_ylabel("Electrical Power [W]")
+    ax.set_title("Power Profile by Segment")
+    ax.grid(True, alpha=0.3)
+
+    # ── SOC profile ───────────────────────────────────────────────────────
+    ax2 = axes[1]
+    timeline = energy_result.battery_timeline
+    times = [s.time for s in timeline]
+    socs = [s.percent_remaining for s in timeline]
+
+    ax2.plot(times, socs, '-', color='#2196F3', linewidth=2)
+    ax2.axhline(y=15, color='r', linestyle='--', alpha=0.5, label='Min SOC (15%)')
+    ax2.fill_between(times, socs, alpha=0.15, color='#2196F3')
+
+    ax2.set_xlabel("Mission Time [s]")
+    ax2.set_ylabel("Battery SOC [%]")
+    ax2.set_title("Battery State of Charge")
+    ax2.set_ylim(0, 105)
+    ax2.legend(fontsize=7)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PARETO FRONT
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_pareto_front(
+    results: List,
+    title: str = "Pareto Front: Energy vs. Time",
+    save_path: str = None,
+) -> plt.Figure:
+    """
+    Plot the Pareto front from a weight sweep.
+
+    Parameters
+    ----------
+    results : list of OptimizationResult
+        From PathOptimizer.pareto_sweep().
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+
+    energies = [r.energy_wh for r in results]
+    times = [r.flight_time_s / 60 for r in results]
+    w_energies = [r.weights[0] for r in results]
+    feasible = [r.fully_feasible for r in results]
+
+    # ── Left: Pareto front ────────────────────────────────────────────────
+    ax = axes[0]
+    for i, (e, t, w, f) in enumerate(zip(energies, times, w_energies, feasible)):
+        color = cm.coolwarm(w)
+        marker = 'o' if f else 'x'
+        size = 80 if f else 60
+        ax.scatter(t, e, c=[color], marker=marker, s=size,
+                  edgecolors='k', linewidths=0.5, zorder=5)
+        ax.annotate(f"w={w:.1f}", (t, e), xytext=(5, 5),
+                   textcoords='offset points', fontsize=6)
+
+    # Connect with line
+    ax.plot(times, energies, '--', color='gray', alpha=0.5, linewidth=0.8)
+
+    ax.set_xlabel("Flight Time [min]")
+    ax.set_ylabel("Energy Consumption [Wh]")
+    ax.set_title("Pareto Front")
+    ax.grid(True, alpha=0.3)
+
+    # Colorbar for weights
+    sm = cm.ScalarMappable(cmap=cm.coolwarm,
+                           norm=plt.Normalize(0, 1))
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, shrink=0.7, pad=0.02)
+    cbar.set_label('w_energy', fontsize=8)
+
+    # ── Right: Trade-off details ──────────────────────────────────────────
+    ax2 = axes[1]
+    x = np.arange(len(results))
+
+    ax2.bar(x - 0.2, energies, 0.35, label='Energy [Wh]',
+            color='#2196F3', alpha=0.7)
+    ax2r = ax2.twinx()
+    ax2r.bar(x + 0.2, times, 0.35, label='Time [min]',
+             color='#FF5722', alpha=0.7)
+
+    ax2.set_xlabel("Weight Configuration")
+    ax2.set_ylabel("Energy [Wh]", color='#2196F3')
+    ax2r.set_ylabel("Time [min]", color='#FF5722')
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f"({r.weights[0]:.1f},{r.weights[1]:.1f})"
+                         for r in results], fontsize=6, rotation=45)
+    ax2.set_title("Trade-off by Weight")
+    ax2.grid(True, alpha=0.3)
+
+    lines1, labels1 = ax2.get_legend_handles_labels()
+    lines2, labels2 = ax2r.get_legend_handles_labels()
+    ax2.legend(lines1 + lines2, labels1 + labels2, fontsize=7)
+
+    fig.suptitle(title, fontsize=12, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SCENARIO COMPARISON DASHBOARD
+# ═══════════════════════════════════════════════════════════════════════════
+
+def plot_scenario_dashboard(
+    scenario_results: Dict[str, List],
+    title: str = "Scenario Optimization Dashboard",
+    save_path: str = None,
+) -> plt.Figure:
+    """
+    Dashboard comparing optimization results across scenario legs.
+
+    Parameters
+    ----------
+    scenario_results : dict
+        leg_key → list of OptimizationResult (from optimize_scenario).
+    """
+    n_legs = len(scenario_results)
+    fig, axes = plt.subplots(2, max(n_legs, 2), figsize=(5 * n_legs, 8))
+    if n_legs == 1:
+        axes = axes.reshape(2, 1)
+
+    for col, (leg_key, results) in enumerate(scenario_results.items()):
+        if col >= axes.shape[1]:
+            break
+
+        # Top: Energy comparison
+        ax = axes[0, col]
+        modes = [r.mode for r in results]
+        initial_e = [r.initial_energy_wh for r in results]
+        opt_e = [r.energy_wh for r in results]
+
+        x = np.arange(len(results))
+        ax.bar(x - 0.2, initial_e, 0.35, label='Initial',
+               color='#BBDEFB', edgecolor='#1565C0')
+        ax.bar(x + 0.2, opt_e, 0.35, label='Optimized',
+               color='#2196F3', edgecolor='#0D47A1')
+
+        for i, r in enumerate(results):
+            if r.energy_improvement_pct != 0:
+                ax.annotate(f"{r.energy_improvement_pct:+.1f}%",
+                           (i + 0.2, opt_e[i]), xytext=(0, 5),
+                           textcoords='offset points', fontsize=6,
+                           ha='center', fontweight='bold',
+                           color='green' if r.energy_improvement_pct > 0 else 'red')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels([m.upper() for m in modes], fontsize=7)
+        ax.set_ylabel("Energy [Wh]")
+        ax.set_title(leg_key.replace('_', ' '), fontsize=9)
+        ax.legend(fontsize=6)
+        ax.grid(True, alpha=0.3)
+
+        # Bottom: Time comparison
+        ax2 = axes[1, col]
+        initial_t = [r.initial_time_s / 60 for r in results]
+        opt_t = [r.flight_time_s / 60 for r in results]
+
+        ax2.bar(x - 0.2, initial_t, 0.35, label='Initial',
+                color='#FFCCBC', edgecolor='#BF360C')
+        ax2.bar(x + 0.2, opt_t, 0.35, label='Optimized',
+                color='#FF5722', edgecolor='#BF360C')
+
+        for i, r in enumerate(results):
+            if r.time_improvement_pct != 0:
+                ax2.annotate(f"{r.time_improvement_pct:+.1f}%",
+                            (i + 0.2, opt_t[i]), xytext=(0, 5),
+                            textcoords='offset points', fontsize=6,
+                            ha='center', fontweight='bold',
+                            color='green' if r.time_improvement_pct > 0 else 'red')
+
+        ax2.set_xticks(x)
+        ax2.set_xticklabels([m.upper() for m in modes], fontsize=7)
+        ax2.set_ylabel("Time [min]")
+        ax2.legend(fontsize=6)
+        ax2.grid(True, alpha=0.3)
+
+    # Hide unused columns
+    for col in range(len(scenario_results), axes.shape[1]):
+        axes[0, col].set_visible(False)
+        axes[1, col].set_visible(False)
+
+    fig.suptitle(title, fontsize=13, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    return fig

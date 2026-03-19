@@ -1,0 +1,161 @@
+{
+  "metadata": {
+    "name": "Quito Metropolitan District Airspace",
+    "region": "DMQ, Ecuador",
+    "regulation": "RDAC 101 (DGAC Ecuador, Resolution DGAC-DGAC-2024-0100-R, Dec 2024)",
+    "reference_icao": "ICAO Annex 14",
+    "version": "1.0",
+    "author": "Victor Alulema (EPN / LUAS-EPN)",
+    "notes": "Zones compiled from DGAC regulations and public geographic data"
+  },
+  "zones": [
+    {
+      "zone_id": "SEQM_Airport",
+      "zone_type": "aerodrome_ctr",
+      "geometry_type": "circle",
+      "center_lat": -0.1292,
+      "center_lon": -78.3588,
+      "radius_m": 9000.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 4200.0,
+      "is_agl": false,
+      "buffer_m": 500.0,
+      "description": "Mariscal Sucre Intl Airport (SEQM) — 9 km per RDAC 101 Sec. 101.43"
+    },
+    {
+      "zone_id": "GOV_Carondelet",
+      "zone_type": "prohibited",
+      "geometry_type": "circle",
+      "center_lat": -0.2204,
+      "center_lon": -78.5124,
+      "radius_m": 800.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 5000.0,
+      "is_agl": false,
+      "buffer_m": 200.0,
+      "description": "Palacio de Carondelet & Government Quarter — presidential/ministerial complex"
+    },
+    {
+      "zone_id": "GOV_Asamblea",
+      "zone_type": "prohibited",
+      "geometry_type": "circle",
+      "center_lat": -0.2128,
+      "center_lon": -78.4979,
+      "radius_m": 500.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 5000.0,
+      "is_agl": false,
+      "buffer_m": 200.0,
+      "description": "Asamblea Nacional del Ecuador — National Assembly building"
+    },
+    {
+      "zone_id": "MIL_FAE_Bicentenario",
+      "zone_type": "restricted",
+      "geometry_type": "circle",
+      "center_lat": -0.1534,
+      "center_lon": -78.4886,
+      "radius_m": 1200.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 4000.0,
+      "is_agl": false,
+      "buffer_m": 300.0,
+      "description": "FAE Ala de Combate No.11 / Parque Bicentenario — military air facility"
+    },
+    {
+      "zone_id": "MIL_ESPE",
+      "zone_type": "restricted",
+      "geometry_type": "circle",
+      "center_lat": -0.3145,
+      "center_lon": -78.4442,
+      "radius_m": 1000.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 4000.0,
+      "is_agl": false,
+      "buffer_m": 200.0,
+      "description": "ESPE — Universidad de las Fuerzas Armadas, military campus Sangolqui"
+    },
+    {
+      "zone_id": "MIL_Atahualpa",
+      "zone_type": "restricted",
+      "geometry_type": "circle",
+      "center_lat": -0.2523,
+      "center_lon": -78.5210,
+      "radius_m": 800.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 4000.0,
+      "is_agl": false,
+      "buffer_m": 200.0,
+      "description": "Fuerte Militar Atahualpa — Ejercito Ecuatoriano headquarters"
+    },
+    {
+      "zone_id": "POP_CentroHistorico",
+      "zone_type": "populated_area",
+      "geometry_type": "polygon",
+      "vertices": [
+        [-0.2100, -78.5180],
+        [-0.2100, -78.5050],
+        [-0.2320, -78.5050],
+        [-0.2320, -78.5200],
+        [-0.2200, -78.5230]
+      ],
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 60.0,
+      "is_agl": true,
+      "buffer_m": 200.0,
+      "description": "Centro Historico de Quito — UNESCO site, dense population, 60m AGL"
+    },
+    {
+      "zone_id": "POP_LosChillos",
+      "zone_type": "populated_area",
+      "geometry_type": "polygon",
+      "vertices": [
+        [-0.2850, -78.4700],
+        [-0.2800, -78.4300],
+        [-0.3300, -78.4200],
+        [-0.3400, -78.4600],
+        [-0.3100, -78.4800]
+      ],
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 60.0,
+      "is_agl": true,
+      "buffer_m": 200.0,
+      "description": "Valle de Los Chillos — suburban populated area, 60m AGL ceiling"
+    },
+    {
+      "zone_id": "ECO_Pululahua",
+      "zone_type": "ecological",
+      "geometry_type": "circle",
+      "center_lat": 0.0389,
+      "center_lon": -78.5056,
+      "radius_m": 3500.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 4500.0,
+      "is_agl": false,
+      "buffer_m": 500.0,
+      "description": "Reserva Geobotanica Pululahua — volcanic caldera, ecological protection"
+    },
+    {
+      "zone_id": "ECO_Cotopaxi",
+      "zone_type": "ecological",
+      "geometry_type": "circle",
+      "center_lat": -0.6840,
+      "center_lon": -78.4367,
+      "radius_m": 15000.0,
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 6500.0,
+      "is_agl": false,
+      "buffer_m": 1000.0,
+      "description": "Parque Nacional Cotopaxi — volcanic/ecological exclusion zone"
+    },
+    {
+      "zone_id": "REG_AGL120",
+      "zone_type": "altitude_limit",
+      "geometry_type": "global",
+      "altitude_floor_m": 0.0,
+      "altitude_ceiling_m": 120.0,
+      "is_agl": true,
+      "buffer_m": 0.0,
+      "description": "RDAC 101 Sec. 101.35 — 120m AGL ceiling for all UAS operations"
+    }
+  ]
+}
