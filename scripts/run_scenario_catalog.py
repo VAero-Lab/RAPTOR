@@ -6,7 +6,7 @@ Usage:
     python run_scenario_catalog.py [--maxiter 60] [--popsize 12] [--seed 42]
     python run_scenario_catalog.py --maxiter 200 --popsize 20  # publication
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 import sys, os, argparse, time, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))

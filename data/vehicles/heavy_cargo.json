@@ -1,0 +1,30 @@
+{
+  "name": "Heavy Cargo",
+  "description": "Larger platform for heavy payloads (~25 kg MTOW).",
+  "airframe": {
+    "m_tow": 25.0,
+    "g": 9.80665,
+    "S_ref": 0.85,
+    "C_L": 1.159,
+    "C_L_max": 1.782,
+    "C_D0": 0.035,
+    "e_oswald": 0.78,
+    "AR": 7.5
+  },
+  "rotors": {
+    "A_rotor": 0.40,
+    "V_tip": 90.0,
+    "sigma_rotor": 0.06,
+    "C_d_blade": 0.012,
+    "k_i": 1.15
+  },
+  "propulsion": {
+    "eta_prop": 0.58
+  },
+  "battery": {
+    "battery_mass": 6.0,
+    "specific_energy": 200.0,
+    "battery_voltage": 44.4,
+    "battery_capacity_mah": 0.0
+  }
+}

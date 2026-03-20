@@ -24,7 +24,7 @@ Regulatory reference: RDAC 101 (DGAC Ecuador, 2024)
     - VLOS requirement (waivable for specific operations)
     - Populated area restrictions
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations

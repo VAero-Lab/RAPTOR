@@ -27,7 +27,7 @@ Path structure (for N intermediate waypoints):
     [FW_CLIMB/DESCEND →] FW_CRUISE  (WP_N → destination)
     → FW_DESCEND → TRANSITION → VTOL_DESCEND
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations

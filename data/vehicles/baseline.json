@@ -1,0 +1,30 @@
+{
+  "name": "Baseline Medical Delivery",
+  "description": "Default medical delivery quad-plane (~12 kg MTOW).",
+  "airframe": {
+    "m_tow": 12.0,
+    "g": 9.80665,
+    "S_ref": 0.50,
+    "C_L": 1.159,
+    "C_L_max": 1.782,
+    "C_D0": 0.013,
+    "e_oswald": 0.78,
+    "AR": 8.0
+  },
+  "rotors": {
+    "A_rotor": 0.20,
+    "V_tip": 80.0,
+    "sigma_rotor": 0.06,
+    "C_d_blade": 0.012,
+    "k_i": 1.15
+  },
+  "propulsion": {
+    "eta_prop": 0.6
+  },
+  "battery": {
+    "battery_mass": 3.0,
+    "specific_energy": 200.0,
+    "battery_voltage": 22.2,
+    "battery_capacity_mah": 0.0
+  }
+}

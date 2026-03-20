@@ -8,7 +8,7 @@ Orchestrates multi-leg missions across the scenario catalog:
     - Mission-level metrics aggregation
     - Visit sequence reordering (nearest-neighbor TSP heuristic)
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations

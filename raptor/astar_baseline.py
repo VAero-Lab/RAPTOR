@@ -14,7 +14,7 @@ The A* planner:
 This is NOT the primary method — it serves as a baseline to quantify
 the advantage of continuous optimization over graph-based planning.
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations
@@ -40,6 +40,28 @@ class AStarResult:
     grid_resolution_m: float
     n_altitude_levels: int
     path_found: bool
+
+    def get_waypoints_array(self) -> np.ndarray:
+        """
+        Return waypoints as (N, 5) array [lat, lon, alt, time_s, dist_m].
+
+        Provides the same interface as FlightPath.get_waypoints_array() so
+        AStarResult can be passed directly to visualization functions.
+        Time is estimated from cumulative distance at a nominal 25 m/s cruise.
+        """
+        if not self.waypoints:
+            return np.empty((0, 5))
+        pts = np.array(self.waypoints, dtype=float)   # (N, 3): lat, lon, alt
+        N = len(pts)
+        dists = np.zeros(N)
+        for i in range(1, N):
+            lat1, lat2 = np.radians(pts[i - 1, 0]), np.radians(pts[i, 0])
+            dlat = lat2 - lat1
+            dlon = np.radians(pts[i, 1] - pts[i - 1, 1])
+            a = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+            dists[i] = dists[i - 1] + 6_371_000 * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+        times = dists / 25.0   # rough 25 m/s cruise estimate
+        return np.column_stack([pts[:, 0], pts[:, 1], pts[:, 2], times, dists])
 
 
 class AStarGridPlanner:

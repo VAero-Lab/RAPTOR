@@ -20,6 +20,7 @@ from raptor.energy import AircraftEnergyParams, analyze_path_energy
 from raptor.terrain import TerrainAnalyzer
 from raptor.airspace import build_airspace
 from raptor.optimizer import PathOptimizer, OptMode
+from raptor.astar_baseline import AStarGridPlanner
 
 def find_dem():
     for p in ['data/dmq_dem.npz', 'dmq_dem.npz', '../data/dmq_dem.npz']:
@@ -45,6 +46,15 @@ def main():
 
     orig = FacilityNode('H.Espejo', -0.2000, -78.4930, 2788.0)
     dest = FacilityNode('CS.Conocoto', -0.3080, -78.4710, 2510.0)
+
+    # A* baseline (for path comparison plots)
+    print("  A*. Running A* grid planner...", end=" ", flush=True)
+    astar = AStarGridPlanner(dem, ac, airspace=airspace, grid_resolution_m=500)
+    ra = astar.plan(
+        (orig.lat, orig.lon, orig.ground_elev),
+        (dest.lat, dest.lon, dest.ground_elev),
+    )
+    print(f"E={ra.total_energy_wh:.0f}Wh, found={ra.path_found}")
 
     # A. Baseline (straight, no optimization)
     fp_base = builder.build(orig, dest, PathStrategy.HIGH_OVERFLY)
@@ -87,6 +97,8 @@ def main():
             'Direct (opt)': rp_direct.flight_path,
             'RDAC (opt)': rp.flight_path,
         }
+        if ra.path_found:
+            paths['A* Grid'] = ra
         figs = plot_all(
             dem=dem, paths=paths, facilities=[orig, dest],
             energy_results=[e_base, e_direct, e_opt],

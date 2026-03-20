@@ -26,7 +26,7 @@ Why differential_evolution?
     - Penalty-based constraint handling integrates naturally
     - Robust convergence with moderate computational cost
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations

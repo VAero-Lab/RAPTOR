@@ -23,7 +23,7 @@ Each scenario includes:
     - Medical urgency level
     - DEM challenge description
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations

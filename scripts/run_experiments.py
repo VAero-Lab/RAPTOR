@@ -11,7 +11,7 @@ Usage:
     python -m scripts.run_experiments --plot                    # tables + 7 figures
     python -m scripts.run_experiments --plot --maxiter 200      # publication quality
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 import sys, os, argparse, time, numpy as np
 
@@ -126,10 +126,13 @@ def main():
     ]
 
     labels, ea, ed, ta_l, td = [], [], [], [], []
+    ra_reference = None   # A* result for the reference route (Espejo→Conocoto)
     print(f"\n{'Route':<20s} | {'E_A*':>7s} | {'E_DE':>7s} | {'t_A*':>6s} | {'t_DE':>6s}")
     print("-" * 55)
-    for name, start, end, o, d in routes:
+    for i, (name, start, end, o, d) in enumerate(routes):
         ra = astar.plan(start, end)
+        if i == 0:
+            ra_reference = ra  # capture Espejo→Conocoto A* path for 2D/3D plots
         rp = RoutedPath(o, d, dem, uav, constraints, n_intermediate=1)
         optimizer.optimize_routed(rp, mode=OptMode.ENERGY, payload_kg=1.5,
             airspace=airspace, maxiter=MI//2, popsize=POP//2, verbose=False, seed=SEED)
@@ -203,6 +206,8 @@ def main():
             'Direct (opt)': rp_d.flight_path,
             'RDAC (opt)': rp_r.flight_path,
         }
+        if ra_reference and ra_reference.path_found:
+            all_paths['A* Grid'] = ra_reference
         facilities = [orig, dest]
 
         fig = plot_path_2d(dem, all_paths, facilities=facilities,

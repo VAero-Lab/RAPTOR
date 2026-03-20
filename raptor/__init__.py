@@ -24,7 +24,7 @@ Modules:
     mission_planner— Multi-leg mission orchestration with SOC coupling
     visualization  — Convergence, path, DEM, and Pareto visualization
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from .config import UAVConfig, MissionConstraints
@@ -67,6 +67,12 @@ from .optimizer import (
     PathOptimizer, OptMode,
     OptimizationResult,
 )
+from .vehicles import (
+    load_vehicle_from_json, load_default_vehicle,
+    list_vehicle_configs, get_vehicle,
+    baseline_config, heavy_cargo_config, long_range_config, high_altitude_config,
+    compare_vehicles_at_altitude, VEHICLE_CONFIGS,
+)
 from .visualization import (
     plot_convergence, plot_path_2d, plot_path_3d,
     plot_path_evolution, plot_energy_profile,
@@ -103,6 +109,10 @@ __all__ = [
     "build_scenario_catalog", "get_scenario", "list_scenarios",
     "ALL_FACILITIES", "HANGARS", "SUB_CENTERS",
     "PathOptimizer", "OptMode", "OptimizationResult",
+    "load_vehicle_from_json", "load_default_vehicle",
+    "list_vehicle_configs", "get_vehicle", "VEHICLE_CONFIGS",
+    "baseline_config", "heavy_cargo_config", "long_range_config", "high_altitude_config",
+    "compare_vehicles_at_altitude",
     "plot_convergence", "plot_path_2d", "plot_path_3d",
     "plot_path_evolution", "plot_energy_profile",
     "plot_pareto_front", "plot_scenario_dashboard",

@@ -11,7 +11,7 @@ Provides publication-quality visualizations for:
     - Multi-objective Pareto front plots
     - Scenario comparison dashboards
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations

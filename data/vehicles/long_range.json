@@ -1,0 +1,30 @@
+{
+  "name": "Long Range",
+  "description": "Endurance-optimized platform (~10 kg, high L/D ratio).",
+  "airframe": {
+    "m_tow": 10.0,
+    "g": 9.80665,
+    "S_ref": 0.55,
+    "C_L": 1.159,
+    "C_L_max": 1.5,
+    "C_D0": 0.022,
+    "e_oswald": 0.82,
+    "AR": 10.0
+  },
+  "rotors": {
+    "A_rotor": 0.18,
+    "V_tip": 80.0,
+    "sigma_rotor": 0.06,
+    "C_d_blade": 0.012,
+    "k_i": 1.15
+  },
+  "propulsion": {
+    "eta_prop": 0.72
+  },
+  "battery": {
+    "battery_mass": 3.0,
+    "specific_energy": 220.0,
+    "battery_voltage": 22.2,
+    "battery_capacity_mah": 0.0
+  }
+}

@@ -20,7 +20,7 @@ Provides publication-quality visualizations for:
     - Vehicle comparison
     - A* vs DE comparison
 
-Author: Victor (EPN / LUAS-EPN)
+Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations
