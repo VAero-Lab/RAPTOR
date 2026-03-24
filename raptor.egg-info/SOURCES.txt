@@ -22,13 +22,14 @@ raptor/segments.py
 raptor/terrain.py
 raptor/vehicles.py
 raptor/visualization.py
-raptor/viz_airspace.py
+raptor/visualization_plotly.py
 raptor.egg-info/PKG-INFO
 raptor.egg-info/SOURCES.txt
 raptor.egg-info/dependency_links.txt
 raptor.egg-info/entry_points.txt
 raptor.egg-info/requires.txt
 raptor.egg-info/top_level.txt
+raptor/../data/default_vehicle.json
 raptor/../data/dmq_dem.npz
 raptor/../data/dmq_facilities.json
 raptor/../data/quito_airspace.json

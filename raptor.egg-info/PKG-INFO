@@ -48,6 +48,8 @@ eVTOL/multirotor UAV operations. Supply your own DEM, facility coordinates (pick
 definitions (restricted zones) to apply it to any region. Includes a complete case study for the
 Quito Metropolitan District, Ecuador (2,850 m ASL).
 
+<img src="raptor_package_logo.svg" alt="RAPTOR Logo" width="500">
+
 ## Installation
 
 ```bash

@@ -22,7 +22,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--plot', action='store_true', default=True)
     parser.add_argument('--no-plot', dest='plot', action='store_false')
+    parser.add_argument('--fig-dir', type=str, default='figures')
     args = parser.parse_args()
+
+    args._static_dir = os.path.join(args.fig_dir, 'demo_energy', 'static')
+    args._interactive_dir = os.path.join(args.fig_dir, 'demo_energy', 'interactive')
 
     print("=== Demo: Energy Model ===\n")
     ac = AircraftEnergyParams()
@@ -40,9 +44,27 @@ def main():
 
     if args.plot:
         import matplotlib; matplotlib.use('Agg')
-        from raptor.visualization import plot_stall_envelope
-        fig = plot_stall_envelope(ac, save_path='demo_stall_envelope.png')
-        print("\nSaved demo_stall_envelope.png")
+        from raptor.visualization import plot_stall_envelope, plot_vehicle_comparison
+        from raptor.visualization_plotly import (
+            plot_stall_envelope as iplot_stall_envelope,
+            plot_vehicle_comparison as iplot_vehicle_comparison,
+        )
+        import matplotlib.pyplot as plt
+
+        os.makedirs(args._static_dir, exist_ok=True)
+        os.makedirs(args._interactive_dir, exist_ok=True)
+
+        # Matplotlib (PNG)
+        fig = plot_stall_envelope(ac, save_path=f'{args._static_dir}/stall_envelope.png')
+        plt.close(fig)
+        fig = plot_vehicle_comparison(save_path=f'{args._static_dir}/vehicle_comparison.png')
+        plt.close(fig)
+        print(f"\nSaved 2 PNG figures to {args._static_dir}/")
+
+        # Plotly (HTML)
+        iplot_stall_envelope(ac, save_path=f'{args._interactive_dir}/stall_envelope.html')
+        iplot_vehicle_comparison(save_path=f'{args._interactive_dir}/vehicle_comparison.html')
+        print(f"Saved 2 HTML figures to {args._interactive_dir}/")
 
 if __name__ == '__main__':
     main()

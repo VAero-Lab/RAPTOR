@@ -9,7 +9,7 @@ Usage:
     python -m examples.demo_path_planning
     python -m examples.demo_path_planning --plot
 """
-import sys, os, argparse
+import sys, os, argparse, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from raptor.dem import DEMInterface
@@ -28,8 +28,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--plot', action='store_true', default=True)
     parser.add_argument('--no-plot', dest='plot', action='store_false')
-    parser.add_argument('--fig-dir', type=str, default='demo_path_figures')
+    parser.add_argument('--fig-dir', type=str, default='figures')
     args = parser.parse_args()
+
+    args._static_dir = os.path.join(args.fig_dir, 'demo_path', 'static')
+    args._interactive_dir = os.path.join(args.fig_dir, 'demo_path', 'interactive')
 
     print("=== Demo: Path Planning Pipeline ===\n")
     dem = DEMInterface(find_dem())
@@ -63,17 +66,25 @@ def main():
     if args.plot:
         import matplotlib; matplotlib.use('Agg')
         from raptor.visualization import plot_all
-        figs = plot_all(
+        from raptor.visualization_plotly import plot_all as iplot_all
+        import matplotlib.pyplot as plt
+
+        common_kwargs = dict(
             dem=dem, paths=paths, facilities=[orig, dest],
             energy_results=energy_results, ac=ac,
             airspace=airspace,
-            save_dir=args.fig_dir,
             title_prefix="Demo: ",
         )
-        import matplotlib.pyplot as plt
+
+        # Matplotlib (PNG)
+        figs = plot_all(**common_kwargs, save_dir=args._static_dir)
         for fig in figs.values():
             plt.close(fig)
-        print(f"\nSaved {len(figs)} figures to {args.fig_dir}/: {list(figs.keys())}")
+        print(f"\nSaved {len(figs)} PNG figures to {args._static_dir}/")
+
+        # Plotly (HTML)
+        ifigs = iplot_all(**common_kwargs, save_dir=args._interactive_dir)
+        print(f"Saved {len(ifigs)} HTML figures to {args._interactive_dir}/")
 
 if __name__ == '__main__':
     main()

@@ -29,12 +29,16 @@ def find_dem():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--maxiter', type=int, default=60)
-    parser.add_argument('--popsize', type=int, default=12)
+    parser.add_argument('--maxiter', type=int, default=20)
+    parser.add_argument('--popsize', type=int, default=20)
     parser.add_argument('--plot', action='store_true', default=True)
     parser.add_argument('--no-plot', dest='plot', action='store_false')
-    parser.add_argument('--fig-dir', type=str, default='demo_opt_figures')
+    parser.add_argument('--fig-dir', type=str, default='figures')
     args = parser.parse_args()
+
+    # Output directories
+    args._static_dir = os.path.join(args.fig_dir, 'demo_optimization', 'static')
+    args._interactive_dir = os.path.join(args.fig_dir, 'demo_optimization', 'interactive')
 
     print("=== Demo: Optimization with Airspace ===\n")
     dem = DEMInterface(find_dem())
@@ -44,8 +48,8 @@ def main():
     airspace = build_airspace(dem=dem)
     builder = PathBuilder(dem, uav, constraints)
 
-    orig = FacilityNode('H.Espejo', -0.2000, -78.4930, 2788.0)
-    dest = FacilityNode('CS.Conocoto', -0.3080, -78.4710, 2510.0)
+    orig = FacilityNode('P.A.Suarez', -0.1128,-78.4907,2758)
+    dest = FacilityNode('Lloa', -0.2480,-78.5800,3048)
 
     # A* baseline (for path comparison plots)
     print("  A*. Running A* grid planner...", end=" ", flush=True)
@@ -63,8 +67,8 @@ def main():
 
     # B. Optimized without airspace (N=0)
     print("  B. Optimizing direct (no airspace)...", end=" ", flush=True)
-    rp_direct = RoutedPath(orig, dest, dem, uav, constraints, n_intermediate=0)
-    optimizer.optimize_routed(rp_direct, mode=OptMode.ENERGY, payload_kg=1.5,
+    rp_direct = RoutedPath(orig, dest, dem, uav, constraints, n_intermediate=3)
+    optimizer.optimize_routed(rp_direct, mode=OptMode.MULTI, payload_kg=1.5,
         airspace=None, maxiter=args.maxiter, popsize=args.popsize,
         verbose=False, seed=42)
     e_direct = analyze_path_energy(rp_direct.flight_path, ac)
@@ -73,8 +77,8 @@ def main():
 
     # C. Optimized with RDAC 101 (N=1)
     print("  C. Optimizing with RDAC 101...", end=" ", flush=True)
-    rp = RoutedPath(orig, dest, dem, uav, constraints, n_intermediate=1)
-    r = optimizer.optimize_routed(rp, mode=OptMode.ENERGY, payload_kg=1.5,
+    rp = RoutedPath(orig, dest, dem, uav, constraints, n_intermediate=3)
+    r = optimizer.optimize_routed(rp, mode=OptMode.MULTI, payload_kg=1.5,
         airspace=airspace, maxiter=args.maxiter, popsize=args.popsize,
         verbose=False, seed=42)
     e_opt = analyze_path_energy(rp.flight_path, ac)
@@ -92,6 +96,8 @@ def main():
     if args.plot:
         import matplotlib; matplotlib.use('Agg')
         from raptor.visualization import plot_all
+        from raptor.visualization_plotly import plot_all as iplot_all
+
         paths = {
             'Baseline': fp_base,
             'Direct (opt)': rp_direct.flight_path,
@@ -99,7 +105,8 @@ def main():
         }
         if ra.path_found:
             paths['A* Grid'] = ra
-        figs = plot_all(
+
+        common_kwargs = dict(
             dem=dem, paths=paths, facilities=[orig, dest],
             energy_results=[e_base, e_direct, e_opt],
             opt_results=[r] if r else None,
@@ -110,13 +117,19 @@ def main():
             fp_rdac=rp.flight_path,
             rp_direct=rp_direct, rp_rdac=rp,
             e_straight=e_base, e_direct=e_direct, e_rdac=e_opt,
-            save_dir=args.fig_dir,
             title_prefix="Demo: ",
         )
+
+        # Matplotlib figures (PNG)
+        figs = plot_all(**common_kwargs, save_dir=args._static_dir)
         import matplotlib.pyplot as plt
         for fig in figs.values():
             plt.close(fig)
-        print(f"\nSaved {len(figs)} figures to {args.fig_dir}/: {list(figs.keys())}")
+        print(f"\nSaved {len(figs)} PNG figures to {args._static_dir}/")
+
+        # Plotly figures (HTML)
+        ifigs = iplot_all(**common_kwargs, save_dir=args._interactive_dir)
+        print(f"Saved {len(ifigs)} HTML figures to {args._interactive_dir}/")
 
 if __name__ == '__main__':
     main()

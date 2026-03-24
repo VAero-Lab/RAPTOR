@@ -22,7 +22,8 @@ Modules:
     scenarios      — Medical delivery flight scenario definitions
     optimizer      — Path optimization engine (DE-based)
     mission_planner— Multi-leg mission orchestration with SOC coupling
-    visualization  — Convergence, path, DEM, and Pareto visualization
+    visualization         — Matplotlib publication-quality figures
+    visualization_plotly  — Interactive Plotly/HTML figures (same API)
 
 Author: Victor (LUAS-EPN / KU Leuven)
 """
@@ -83,6 +84,25 @@ from .visualization import (
     plot_three_path_comparison, plot_vehicle_comparison,
     plot_astar_vs_de, plot_all,
 )
+from .visualization_plotly import (
+    plot_convergence as iplot_convergence,
+    plot_path_2d as iplot_path_2d,
+    plot_path_3d as iplot_path_3d,
+    plot_path_evolution as iplot_path_evolution,
+    plot_energy_profile as iplot_energy_profile,
+    plot_pareto_front as iplot_pareto_front,
+    plot_scenario_dashboard as iplot_scenario_dashboard,
+    plot_airspace_map as iplot_airspace_map,
+    plot_path_vs_ceiling as iplot_path_vs_ceiling,
+    plot_topology_comparison as iplot_topology_comparison,
+    plot_constraint_budget as iplot_constraint_budget,
+    plot_mission_soc as iplot_mission_soc,
+    plot_stall_envelope as iplot_stall_envelope,
+    plot_three_path_comparison as iplot_three_path_comparison,
+    plot_vehicle_comparison as iplot_vehicle_comparison,
+    plot_astar_vs_de as iplot_astar_vs_de,
+    plot_all as iplot_all,
+)
 
 __version__ = "0.4.0"
 __all__ = [
@@ -113,6 +133,7 @@ __all__ = [
     "list_vehicle_configs", "get_vehicle", "VEHICLE_CONFIGS",
     "baseline_config", "heavy_cargo_config", "long_range_config", "high_altitude_config",
     "compare_vehicles_at_altitude",
+    # matplotlib (publication)
     "plot_convergence", "plot_path_2d", "plot_path_3d",
     "plot_path_evolution", "plot_energy_profile",
     "plot_pareto_front", "plot_scenario_dashboard",
@@ -121,5 +142,14 @@ __all__ = [
     "plot_mission_soc", "plot_stall_envelope",
     "plot_three_path_comparison", "plot_vehicle_comparison",
     "plot_astar_vs_de", "plot_all",
+    # plotly (interactive HTML)
+    "iplot_convergence", "iplot_path_2d", "iplot_path_3d",
+    "iplot_path_evolution", "iplot_energy_profile",
+    "iplot_pareto_front", "iplot_scenario_dashboard",
+    "iplot_airspace_map", "iplot_path_vs_ceiling",
+    "iplot_topology_comparison", "iplot_constraint_budget",
+    "iplot_mission_soc", "iplot_stall_envelope",
+    "iplot_three_path_comparison", "iplot_vehicle_comparison",
+    "iplot_astar_vs_de", "iplot_all",
 ]
 

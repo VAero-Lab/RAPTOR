@@ -24,6 +24,14 @@ from raptor.visualization import (
     plot_mission_soc, plot_airspace_map, plot_stall_envelope,
     plot_path_2d, plot_path_3d, plot_energy_profile,
 )
+from raptor.visualization_plotly import (
+    plot_mission_soc as iplot_mission_soc,
+    plot_airspace_map as iplot_airspace_map,
+    plot_stall_envelope as iplot_stall_envelope,
+    plot_path_2d as iplot_path_2d,
+    plot_path_3d as iplot_path_3d,
+    plot_energy_profile as iplot_energy_profile,
+)
 
 
 def find_dem():
@@ -42,8 +50,11 @@ def main():
     parser.add_argument('--output', type=str, default='catalog_results.md')
     parser.add_argument('--plot', action='store_true', default=True, help='Generate figures')
     parser.add_argument('--no-plot', dest='plot', action='store_false')
-    parser.add_argument('--fig-dir', type=str, default='scenario_figures')
+    parser.add_argument('--fig-dir', type=str, default='figures')
     args = parser.parse_args()
+
+    args._static_dir = os.path.join(args.fig_dir, 'scenarios', 'static')
+    args._interactive_dir = os.path.join(args.fig_dir, 'scenarios', 'interactive')
 
     print("Loading framework...")
     dem = DEMInterface(find_dem())
@@ -52,21 +63,34 @@ def main():
     airspace = build_airspace(dem=dem)
     planner = MissionPlanner(dem, uav, constraints, ac, airspace=airspace)
     catalog = build_scenario_catalog()
-    os.makedirs(args.fig_dir, exist_ok=True)
+    if args.plot:
+        os.makedirs(args._static_dir, exist_ok=True)
+        os.makedirs(args._interactive_dir, exist_ok=True)
 
     # Global figures (generated once, independent of scenario runs)
     if args.plot:
         fig = plot_airspace_map(dem, airspace, facilities=ALL_FACILITIES,
             title='Quito DMQ — RDAC 101 Airspace Restrictions',
             lat_range=(-0.40, 0.06), lon_range=(-78.60, -78.35),
-            save_path=f'{args.fig_dir}/airspace_overview.png', figsize=(11, 9))
+            save_path=f'{args._static_dir}/airspace_overview.png', figsize=(11, 9))
         plt.close(fig)
         print(f"Saved airspace_overview.png")
 
         fig = plot_stall_envelope(ac,
-            save_path=f'{args.fig_dir}/stall_envelope.png')
+            save_path=f'{args._static_dir}/stall_envelope.png')
         plt.close(fig)
         print(f"Saved stall_envelope.png")
+
+        # Plotly equivalents
+        iplot_airspace_map(dem, airspace, facilities=ALL_FACILITIES,
+            title='Quito DMQ — RDAC 101 Airspace Restrictions',
+            lat_range=(-0.40, 0.06), lon_range=(-78.60, -78.35),
+            save_path=f'{args._interactive_dir}/airspace_overview.html', figsize=(11, 9))
+        print(f"Saved airspace_overview.html")
+
+        iplot_stall_envelope(ac,
+            save_path=f'{args._interactive_dir}/stall_envelope.html')
+        print(f"Saved stall_envelope.html")
 
     scenario_ids = args.scenarios or list(catalog.keys())
     print(f"\nRunning {len(scenario_ids)} scenarios: {scenario_ids}")
@@ -112,12 +136,7 @@ def main():
                     'dist_km': lr.distance_km, 'payload': lr.leg.payload_kg,
                 })
             if args.plot:
-                fig = plot_mission_soc(leg_data, title=f'{sid}: {scenario.name}',
-                    save_path=f'{args.fig_dir}/{sid}_soc_profile.png')
-                plt.close(fig)
-                print(f"  Saved {sid}_soc_profile.png")
-
-                # Path 2D/3D and per-leg energy profiles
+                # Path/leg data shared by both backends
                 leg_paths = {
                     f"Leg {i+1}: {lr.routed_path.origin.short_name}"
                     f"→{lr.routed_path.destination.short_name}":
@@ -130,15 +149,21 @@ def main():
                     for fac in (lr.routed_path.origin, lr.routed_path.destination)
                 })
 
+                # Matplotlib (PNG)
+                fig = plot_mission_soc(leg_data, title=f'{sid}: {scenario.name}',
+                    save_path=f'{args._static_dir}/{sid}_soc_profile.png')
+                plt.close(fig)
+                print(f"  Saved {sid}_soc_profile.png")
+
                 fig = plot_path_2d(dem, leg_paths, facilities=leg_facs,
                     title=f'{sid}: {scenario.name} — 2D Route',
-                    save_path=f'{args.fig_dir}/{sid}_paths_2d.png')
+                    save_path=f'{args._static_dir}/{sid}_paths_2d.png')
                 plt.close(fig)
                 print(f"  Saved {sid}_paths_2d.png")
 
                 fig = plot_path_3d(dem, leg_paths,
                     title=f'{sid}: {scenario.name} — 3D Route',
-                    save_path=f'{args.fig_dir}/{sid}_paths_3d.png')
+                    save_path=f'{args._static_dir}/{sid}_paths_3d.png')
                 plt.close(fig)
                 print(f"  Saved {sid}_paths_3d.png")
 
@@ -148,16 +173,42 @@ def main():
                     fig = plot_energy_profile(
                         lr.energy_result,
                         title=f'{sid} Leg {i+1}: {leg_lbl} — Energy & SOC',
-                        save_path=f'{args.fig_dir}/{sid}_leg{i+1}_energy.png')
+                        save_path=f'{args._static_dir}/{sid}_leg{i+1}_energy.png')
                     plt.close(fig)
                     print(f"  Saved {sid}_leg{i+1}_energy.png")
+
+                # Plotly (HTML)
+                iplot_mission_soc(leg_data, title=f'{sid}: {scenario.name}',
+                    save_path=f'{args._interactive_dir}/{sid}_soc_profile.html')
+                print(f"  Saved {sid}_soc_profile.html")
+
+                iplot_path_2d(dem, leg_paths, facilities=leg_facs,
+                    title=f'{sid}: {scenario.name} — 2D Route',
+                    save_path=f'{args._interactive_dir}/{sid}_paths_2d.html')
+                print(f"  Saved {sid}_paths_2d.html")
+
+                iplot_path_3d(dem, leg_paths,
+                    title=f'{sid}: {scenario.name} — 3D Route',
+                    save_path=f'{args._interactive_dir}/{sid}_paths_3d.html')
+                print(f"  Saved {sid}_paths_3d.html")
+
+                for i, lr in enumerate(best.legs):
+                    leg_lbl = (f"{lr.routed_path.origin.short_name}"
+                               f"→{lr.routed_path.destination.short_name}")
+                    iplot_energy_profile(
+                        lr.energy_result,
+                        title=f'{sid} Leg {i+1}: {leg_lbl} — Energy & SOC',
+                        save_path=f'{args._interactive_dir}/{sid}_leg{i+1}_energy.html')
+                    print(f"  Saved {sid}_leg{i+1}_energy.html")
 
     print(f"\n{'='*80}\nAll scenarios completed in {time.time()-t0:.0f}s")
 
     # Write results markdown
     write_results(all_results, catalog, args)
     print(f"Results written to {args.output}")
-    print(f"Figures saved to {args.fig_dir}/")
+    print(f"PNG figures saved to {args._static_dir}/")
+    if args.plot:
+        print(f"HTML figures saved to {args._interactive_dir}/")
 
 
 def write_results(all_results, catalog, args):

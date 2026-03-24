@@ -100,13 +100,22 @@ _CONFIG_COLORS = {
 }
 
 plt.rcParams.update({
-    'figure.dpi': 150,
+    'figure.dpi': 200,
     'font.size': 9,
-    'font.family': 'sans-serif',
+    'font.family': 'serif',
+    'font.serif': ['Georgia', 'Times New Roman', 'DejaVu Serif'],
     'axes.titlesize': 11,
+    'axes.titlepad': 10,
     'axes.labelsize': 9,
+    'axes.labelpad': 6,
     'legend.fontsize': 7,
     'figure.facecolor': 'white',
+    'xtick.labelsize': 8,
+    'ytick.labelsize': 8,
+    'xtick.direction': 'in',
+    'ytick.direction': 'in',
+    'xtick.major.pad': 4,
+    'ytick.major.pad': 4,
 })
 
 
@@ -182,7 +191,7 @@ def plot_convergence(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -245,7 +254,7 @@ def plot_path_2d(
     rgb = ls.shade(elev_sub, cmap=cm.terrain, blend_mode='soft',
                    vmin=np.nanmin(elev_sub), vmax=np.nanmax(elev_sub))
     ax.imshow(rgb, extent=[lon_sub[0], lon_sub[-1], lat_sub[0], lat_sub[-1]],
-              origin='lower', aspect='auto')
+              origin='lower', aspect='equal')
 
     # Contour lines
     levels = np.arange(
@@ -320,7 +329,7 @@ def plot_path_2d(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -410,7 +419,7 @@ def plot_path_3d(
 
     plt.tight_layout()
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -512,7 +521,7 @@ def plot_path_evolution(
     plt.tight_layout(rect=[0, 0.06, 1, 0.95])
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -576,7 +585,7 @@ def plot_energy_profile(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -657,7 +666,7 @@ def plot_pareto_front(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -747,7 +756,7 @@ def plot_scenario_dashboard(
     plt.tight_layout()
 
     if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
 
 
@@ -808,7 +817,7 @@ def plot_airspace_map(
                    vmin=np.nanmin(elev_sub) - 200,
                    vmax=np.nanmax(elev_sub) + 200)
     ax.imshow(rgb, extent=[lon_sub[0], lon_sub[-1], lat_sub[0], lat_sub[-1]],
-              origin='lower', aspect='auto')
+              origin='lower', aspect='equal')
 
     # Contour lines
     levels = np.arange(
@@ -1127,7 +1136,7 @@ def plot_topology_comparison(
                               vmax=np.nanmax(elev_sub) + 200)
             ax.imshow(rgb, extent=[lon_sub[0], lon_sub[-1],
                                    lat_sub[0], lat_sub[-1]],
-                     origin='lower', aspect='auto')
+                     origin='lower', aspect='equal')
 
         # Airspace zones (only for ON column)
         if col == 1:
@@ -1231,7 +1240,7 @@ def plot_topology_comparison(
         ax2.grid(True, alpha=0.3)
 
     fig.suptitle(title, fontsize=13, fontweight='bold', y=1.01)
-    plt.tight_layout()
+    plt.tight_layout(h_pad=2.0, w_pad=1.5)
     if save_path:
         fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
@@ -1540,7 +1549,7 @@ def _draw_dem_on_ax(ax, dem, lr, lo):
     rgb = li.shade(el, cmap=cm.terrain, blend_mode='soft',
                    vmin=np.nanmin(el) - 200, vmax=np.nanmax(el) + 200)
     ax.imshow(rgb, extent=[lo_[0], lo_[-1], ls_[0], ls_[-1]],
-              origin='lower', aspect='auto')
+              origin='lower', aspect='equal')
     cs = ax.contour(LO, LA, el,
                     levels=np.arange(np.nanmin(el) // 200 * 200,
                                      np.nanmax(el) + 300, 200),
@@ -1681,8 +1690,8 @@ def plot_three_path_comparison(
         ax2.set_title("Altitude Profile", fontsize=9)
         ax2.legend(fontsize=6); ax2.grid(True, alpha=0.3)
 
-    fig.suptitle(title, fontsize=13, fontweight='bold')
-    plt.tight_layout()
+    fig.suptitle(title, fontsize=13, fontweight='bold', y=1.01)
+    plt.tight_layout(h_pad=2.5, w_pad=1.5)
     if save_path:
         fig.savefig(save_path, dpi=200, bbox_inches='tight')
     return fig
