@@ -23,9 +23,8 @@ from raptor.optimizer import PathOptimizer, OptMode
 from raptor.astar_baseline import AStarGridPlanner
 
 def find_dem():
-    for p in ['data/dmq_dem.npz', 'dmq_dem.npz', '../data/dmq_dem.npz']:
-        if os.path.exists(p): return p
-    raise FileNotFoundError("dmq_dem.npz not found")
+    from raptor.dem import find_dem as _find
+    return _find()
 
 def main():
     parser = argparse.ArgumentParser()

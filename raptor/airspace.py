@@ -5,24 +5,21 @@ Airspace Restrictions — 3D Geofence and Regulatory Zone Management
 Defines, stores, and queries 3D airspace restriction volumes for
 regulatory-aware eVTOL path planning.
 
-Zone types:
-    PROHIBITED       — No flight allowed (military, security)
-    RESTRICTED       — Authorized operations only
-    AERODROME_CTR    — Airport control zone (cylindrical)
-    ALTITUDE_LIMIT   — AGL ceiling (terrain-following)
-    POPULATED_AREA   — Reduced altitude ceiling over urban areas
-    ECOLOGICAL       — Protected natural areas
-    TEMPORAL         — Temporary flight restriction (TFR)
-
 The AirspaceManager integrates with the DEM to resolve AGL constraints
 (which depend on terrain elevation) and provides efficient point-in-zone
 and path-through-zone checking for the optimizer.
 
-Regulatory reference: RDAC 101 (DGAC Ecuador, 2024)
-    - Max altitude: 120 m AGL (400 ft) general
-    - Aerodrome exclusion: 9 km radius
-    - VLOS requirement (waivable for specific operations)
-    - Populated area restrictions
+Every zone carries a :class:`~raptor.regulations.PermissionClass`, which
+is what the optimizer actually reasons about:
+
+    FREE        fly through at no cost
+    PERMIT      legal with prior authorisation — a *soft* cost, so the
+                optimizer may still route through when the detour is
+                worse, and reports which permits the plan needs
+    PROHIBITED  hard barrier, never overflown
+
+Regulatory reference: RDAC 101 (DGAC Ecuador, 2024). The numeric limits
+live in :mod:`raptor.regulations`; this module only says *where* they apply.
 
 Author: Victor (LUAS-EPN / KU Leuven)
 """
@@ -33,24 +30,92 @@ from typing import List, Tuple, Optional, Dict, Union
 from enum import Enum
 import numpy as np
 
+from .regulations import (
+    PermissionClass, RegulatoryProfile, OperationalContext, RDAC_101,
+)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ZONE TYPES
 # ═══════════════════════════════════════════════════════════════════════════
 
 class ZoneType(Enum):
-    """Classification of airspace restriction zones."""
-    PROHIBITED = "prohibited"           # No flight under any condition
-    RESTRICTED = "restricted"           # Flight requires special authorization
-    AERODROME_CTR = "aerodrome_ctr"     # Airport control zone
-    ALTITUDE_LIMIT = "altitude_limit"   # AGL ceiling (terrain-following)
-    POPULATED_AREA = "populated_area"   # Urban area with reduced ceiling
-    ECOLOGICAL = "ecological"           # Protected natural area
-    TEMPORAL = "temporal"               # Temporary flight restriction
+    """
+    What kind of thing a zone is.
+
+    The type drives cartography and the *default* permission class; the
+    permission class drives the optimizer. Several types map to the same
+    permission, and any zone may override its default.
+    """
+    PROHIBITED = "prohibited"                 # 101.190(b) — never overflown
+    RESTRICTED = "restricted"                 # 101.190(a) — needs authorisation
+    AERODROME_CTR = "aerodrome_ctr"           # 101.195(a)(1) — prohibited surfaces
+    AERODROME_RING = "aerodrome_ring"         # 101.195(a)(3) — 5 km @ 40 m AGL
+    HELIPORT = "heliport"                     # 101.195(c) — 0.9 km
+    CONTROLLED_AIRSPACE = "controlled_airspace"  # 101.190(a)(2) — Class B/C/D/E
+    ALTITUDE_LIMIT = "altitude_limit"         # 101.185 — AGL ceiling
+    POPULATED_AREA = "populated_area"         # 101.160 — urban operations
+    ECOLOGICAL = "ecological"                 # 101.190(a)(6) — MAATE/SNAP
+    MILITARY = "military"                     # 101.190(a)(3)/(b)(6)
+    GOVERNMENT = "government"                 # 101.190(b)(3)
+    SECURITY = "security"                     # 101.190(b)(1) — state security
+    HOSPITAL = "hospital"                     # 101.190(a)(3)
+    STRATEGIC = "strategic"                   # 101.190(a)(3) — strategic infra
+    INDUSTRIAL = "industrial"                 # industrial installations
+    CROWD = "crowd"                           # 101.190(a)(5) — gatherings
+    TEMPORAL = "temporal"                     # 101.190(b)(7) — NOTAM/TFR
 
 
-# Penalty weights by zone type (used by the optimizer)
-# Higher weight = harder constraint
+#: Default permission class for each zone type. A zone may override it.
+DEFAULT_PERMISSION: Dict[ZoneType, PermissionClass] = {
+    ZoneType.PROHIBITED:          PermissionClass.PROHIBITED,
+    ZoneType.SECURITY:            PermissionClass.PROHIBITED,
+    ZoneType.GOVERNMENT:          PermissionClass.PROHIBITED,
+    ZoneType.AERODROME_CTR:       PermissionClass.PROHIBITED,
+    ZoneType.RESTRICTED:          PermissionClass.PERMIT,
+    ZoneType.AERODROME_RING:      PermissionClass.PERMIT,
+    ZoneType.HELIPORT:            PermissionClass.PERMIT,
+    ZoneType.CONTROLLED_AIRSPACE: PermissionClass.PERMIT,
+    ZoneType.MILITARY:            PermissionClass.PERMIT,
+    ZoneType.HOSPITAL:            PermissionClass.PERMIT,
+    ZoneType.STRATEGIC:           PermissionClass.PERMIT,
+    ZoneType.INDUSTRIAL:          PermissionClass.PERMIT,
+    ZoneType.CROWD:               PermissionClass.PERMIT,
+    ZoneType.ECOLOGICAL:          PermissionClass.PERMIT,
+    ZoneType.TEMPORAL:            PermissionClass.PROHIBITED,
+    ZoneType.POPULATED_AREA:      PermissionClass.FREE,   # a ceiling, not a barrier
+    ZoneType.ALTITUDE_LIMIT:      PermissionClass.FREE,   # a ceiling, not a barrier
+}
+
+#: Which permit family each zone type belongs to (see regulations.DEFAULT_PERMIT_COST).
+DEFAULT_PERMIT_FAMILY: Dict[ZoneType, str] = {
+    ZoneType.AERODROME_CTR:       "aerodrome",
+    ZoneType.AERODROME_RING:      "aerodrome",
+    ZoneType.HELIPORT:            "heliport",
+    ZoneType.CONTROLLED_AIRSPACE: "controlled_airspace",
+    ZoneType.MILITARY:            "military",
+    ZoneType.GOVERNMENT:          "government",
+    ZoneType.SECURITY:            "government",
+    ZoneType.HOSPITAL:            "hospital",
+    ZoneType.STRATEGIC:           "strategic_infrastructure",
+    ZoneType.INDUSTRIAL:          "industrial",
+    ZoneType.CROWD:               "crowd",
+    ZoneType.ECOLOGICAL:          "ecological",
+    ZoneType.POPULATED_AREA:      "populated",
+    ZoneType.RESTRICTED:          "generic",
+    ZoneType.TEMPORAL:            "generic",
+    ZoneType.PROHIBITED:          "generic",
+    ZoneType.ALTITUDE_LIMIT:      "generic",
+}
+
+#: Zone types that express a *ceiling* rather than a lateral barrier.
+CEILING_ZONE_TYPES = (
+    ZoneType.ALTITUDE_LIMIT,
+    ZoneType.POPULATED_AREA,
+    ZoneType.AERODROME_RING,
+)
+
+# Retained for backward compatibility with figures that weight zone types.
 ZONE_PENALTY_WEIGHTS = {
     ZoneType.PROHIBITED: 1000.0,
     ZoneType.RESTRICTED: 500.0,
@@ -83,6 +148,11 @@ class CircularZone:
         d = _haversine_distance(self.center_lat, self.center_lon, lat, lon)
         return d <= self.radius_m
 
+    def contains_points(self, lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+        """Vectorised containment test over many points."""
+        d = _haversine_distance(self.center_lat, self.center_lon, lats, lons)
+        return d <= self.radius_m
+
     def distance_to_boundary(self, lat: float, lon: float) -> float:
         """
         Signed distance to boundary [m].
@@ -111,6 +181,38 @@ class PolygonalZone:
         # Precompute arrays for ray-casting
         self._lats = np.array([v[0] for v in self.vertices])
         self._lons = np.array([v[1] for v in self.vertices])
+        # Bounding box, so the great majority of points are rejected with
+        # four comparisons instead of a walk around the boundary. With
+        # hundreds of waypoints checked against every zone on every one of
+        # tens of thousands of objective evaluations, this is the
+        # difference between an interactive run and an overnight one.
+        self._bbox = (self._lats.min(), self._lats.max(),
+                      self._lons.min(), self._lons.max())
+
+    def contains_points(self, lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+        """Vectorised ray-casting containment test over many points."""
+        la0, la1, lo0, lo1 = self._bbox
+        inside = np.zeros(len(lats), dtype=bool)
+        cand = (lats >= la0) & (lats <= la1) & (lons >= lo0) & (lons <= lo1)
+        if not cand.any():
+            return inside
+
+        y, x = lats[cand], lons[cand]
+        yi, xi = self._lats, self._lons
+        yj = np.roll(yi, 1)
+        xj = np.roll(xi, 1)
+
+        acc = np.zeros(len(y), dtype=bool)
+        for k in range(self._n):
+            cond = (yi[k] > y) != (yj[k] > y)
+            if not cond.any():
+                continue
+            denom = (yj[k] - yi[k]) + 1e-15
+            xint = (xj[k] - xi[k]) * (y - yi[k]) / denom + xi[k]
+            acc ^= cond & (x < xint)
+
+        inside[cand] = acc
+        return inside
 
     def contains_point(self, lat: float, lon: float) -> bool:
         """
@@ -193,6 +295,32 @@ class AirspaceZone:
     active: bool = True                  # Toggle for sensitivity studies
     description: str = ""
 
+    #: Operational permission. Defaults from ``DEFAULT_PERMISSION[zone_type]``.
+    #: Set explicitly to override — e.g. a hospital helipad the operator has
+    #: a standing agreement with can be declared FREE.
+    permission: Optional[PermissionClass] = None
+    #: Permit family, keying into ``RegulatoryProfile.permit_cost``.
+    permit_family: Optional[str] = None
+    #: Authority responsible for granting the permit (for the plan's annex).
+    authority: str = ""
+    #: Regulatory citation, e.g. "RDAC 101.190(a)(3)".
+    citation: str = ""
+
+    def __post_init__(self):
+        if self.permission is None:
+            self.permission = DEFAULT_PERMISSION.get(
+                self.zone_type, PermissionClass.PERMIT
+            )
+        if self.permit_family is None:
+            self.permit_family = DEFAULT_PERMIT_FAMILY.get(
+                self.zone_type, "generic"
+            )
+
+    @property
+    def is_ceiling_zone(self) -> bool:
+        """True if this zone caps altitude rather than blocking laterally."""
+        return self.zone_type in CEILING_ZONE_TYPES
+
     @property
     def is_global(self) -> bool:
         """True if this zone has no horizontal boundary (applies everywhere)."""
@@ -203,6 +331,13 @@ class AirspaceZone:
         if self.is_global:
             return True
         return self.geometry.contains_point(lat, lon)
+
+    def horizontal_contains_many(self, lats: np.ndarray,
+                                 lons: np.ndarray) -> np.ndarray:
+        """Vectorised footprint test over many points."""
+        if self.is_global:
+            return np.ones(len(lats), dtype=bool)
+        return self.geometry.contains_points(lats, lons)
 
     def horizontal_distance(self, lat: float, lon: float) -> float:
         """Signed distance to horizontal boundary. Negative = inside."""
@@ -218,7 +353,8 @@ class AirspaceZone:
         return 0 < d <= self.buffer_m
 
     def check_point(self, lat: float, lon: float, alt_amsl: float,
-                    terrain_elev: float = 0.0) -> 'ZoneViolation':
+                    terrain_elev: float = np.nan,
+                    with_penetration: bool = False) -> 'ZoneViolation':
         """
         Check if a 3D point violates this zone.
 
@@ -244,18 +380,24 @@ class AirspaceZone:
 
         # Resolve vertical limits
         if self.is_agl:
+            if terrain_elev is None or np.isnan(terrain_elev):
+                # No ground reference here — an AGL rule cannot be evaluated,
+                # and guessing one would fabricate a violation.
+                return None
             floor = terrain_elev + self.altitude_floor_m
             ceiling = terrain_elev + self.altitude_ceiling_m
         else:
             floor = self.altitude_floor_m
             ceiling = self.altitude_ceiling_m
 
-        # For ALTITUDE_LIMIT type: violation is being ABOVE the ceiling
-        if self.zone_type == ZoneType.ALTITUDE_LIMIT:
+        # Ceiling zones cap altitude; the violation is flying ABOVE them.
+        if self.is_ceiling_zone:
             if alt_amsl > ceiling:
                 return ZoneViolation(
                     zone_id=self.zone_id,
                     zone_type=self.zone_type,
+                    permission=self.permission,
+                    permit_family=self.permit_family,
                     violation_type='above_ceiling',
                     excess_m=alt_amsl - ceiling,
                     lat=lat, lon=lon, alt=alt_amsl,
@@ -263,30 +405,30 @@ class AirspaceZone:
                 )
             return None
 
-        # For POPULATED_AREA: same as altitude limit but with different penalty
-        if self.zone_type == ZoneType.POPULATED_AREA:
-            if alt_amsl > ceiling:
-                return ZoneViolation(
-                    zone_id=self.zone_id,
-                    zone_type=self.zone_type,
-                    violation_type='above_ceiling',
-                    excess_m=alt_amsl - ceiling,
-                    lat=lat, lon=lon, alt=alt_amsl,
-                    limit_m=ceiling,
-                )
-            return None
-
-        # For PROHIBITED, RESTRICTED, AERODROME_CTR, ECOLOGICAL:
-        # Any point inside the volume (between floor and ceiling) is a violation
+        # Lateral zones: entering the volume between floor and ceiling is an
+        # entry. Whether that entry is fatal or merely costly is decided by
+        # the permission class, not here.
         if floor <= alt_amsl <= ceiling:
+            # How deep inside the zone a point lies is used for reporting
+            # and for the legacy zone-weighted penalty, but not by the
+            # constraint model, which grades a prohibited entry by how
+            # much of the route is inside it. Computing it walks every
+            # polygon edge for every waypoint in every zone, which on
+            # real 24-vertex footprints was the single largest cost in
+            # the objective — so it is opt-in.
+            penetration = 0.0
+            if with_penetration and self.permission == PermissionClass.PROHIBITED:
+                penetration = abs(self.horizontal_distance(lat, lon))
             return ZoneViolation(
                 zone_id=self.zone_id,
                 zone_type=self.zone_type,
-                violation_type='inside_prohibited',
+                permission=self.permission,
+                permit_family=self.permit_family,
+                violation_type='inside_zone',
                 excess_m=0.0,
                 lat=lat, lon=lon, alt=alt_amsl,
                 limit_m=0.0,
-                penetration_m=abs(self.horizontal_distance(lat, lon)),
+                penetration_m=penetration,
             )
 
         return None
@@ -294,66 +436,150 @@ class AirspaceZone:
 
 @dataclass
 class ZoneViolation:
-    """A single airspace violation at a specific point."""
+    """
+    One waypoint's interaction with one zone.
+
+    Not necessarily illegal: a point inside a PERMIT zone is recorded
+    here so the planner can price the detour and list the authorisation,
+    but the route remains flyable once that permit is held.
+    """
     zone_id: str
     zone_type: ZoneType
-    violation_type: str     # 'inside_prohibited', 'above_ceiling'
+    violation_type: str     # 'inside_zone' | 'above_ceiling'
     excess_m: float         # Altitude excess above ceiling [m]
     lat: float
     lon: float
     alt: float
     limit_m: float          # The limit that was violated [m AMSL]
     penetration_m: float = 0.0  # Horizontal penetration depth [m]
+    permission: PermissionClass = PermissionClass.PROHIBITED
+    permit_family: str = "generic"
+
+    @property
+    def is_hard(self) -> bool:
+        """True if this makes the route illegal no matter what."""
+        if self.violation_type == 'above_ceiling':
+            return True     # exceeding the 101.185 ceiling is never permitted
+        return self.permission == PermissionClass.PROHIBITED
 
 
 @dataclass
 class AirspaceReport:
     """
-    Result of checking a complete flight path against airspace zones.
+    A whole path checked against the airspace.
 
-    Provides aggregate metrics for the optimizer penalty function.
+    Separates the three outcomes the planner must not confuse:
+
+    ``hard_violations``
+        Prohibited-zone entries and ceiling exceedances. These make the
+        route illegal; no paperwork fixes them.
+    ``permit_violations``
+        Entries into zones that are legal with prior authorisation.
+        The route stays flyable; ``permits_required`` lists what to ask
+        for and ``permit_cost`` prices it.
+    ``feasible``
+        True when there are no *hard* violations. Permits do not make a
+        route infeasible — that distinction is the whole point of the
+        permission model.
     """
     violations: List[ZoneViolation]
     n_violations: int = 0
     max_excess_m: float = 0.0           # Worst ceiling violation
     max_penetration_m: float = 0.0      # Deepest horizontal penetration
-    total_penalty: float = 0.0          # Weighted penalty sum
+    total_penalty: float = 0.0          # Weighted penalty sum (hard violations)
     violated_zones: List[str] = field(default_factory=list)
     feasible: bool = True
 
+    # ── Permission-aware breakdown ────────────────────────────────────
+    hard_violations: List[ZoneViolation] = field(default_factory=list)
+    permit_violations: List[ZoneViolation] = field(default_factory=list)
+    prohibited_zones: List[str] = field(default_factory=list)
+    ceiling_zones: List[str] = field(default_factory=list)
+    #: zone_id → permit family, for every PERMIT zone the route enters.
+    permits_required: Dict[str, str] = field(default_factory=dict)
+    #: Summed permit effort, using RegulatoryProfile.permit_cost.
+    permit_cost: float = 0.0
+    #: Fraction of sampled waypoints lying inside each PERMIT zone.
+    permit_exposure: Dict[str, float] = field(default_factory=dict)
+    #: Number of waypoints sampled (denominator for exposure).
+    n_samples: int = 0
+
     def __post_init__(self):
         self.n_violations = len(self.violations)
-        self.feasible = self.n_violations == 0
-        if self.violations:
-            self.max_excess_m = max(
-                v.excess_m for v in self.violations
-            )
-            self.max_penetration_m = max(
-                v.penetration_m for v in self.violations
-            )
-            self.violated_zones = list(set(
-                v.zone_id for v in self.violations
-            ))
-            # Compute weighted penalty
-            for v in self.violations:
-                w = ZONE_PENALTY_WEIGHTS.get(v.zone_type, 100.0)
-                if v.violation_type == 'above_ceiling':
-                    self.total_penalty += w * (v.excess_m / 100.0)
-                else:  # inside_prohibited
-                    self.total_penalty += w * (1.0 + v.penetration_m / 500.0)
+        if not self.violations:
+            self.feasible = True
+            return
+
+        self.hard_violations = [v for v in self.violations if v.is_hard]
+        self.permit_violations = [v for v in self.violations if not v.is_hard]
+
+        self.feasible = len(self.hard_violations) == 0
+        self.max_excess_m = max((v.excess_m for v in self.violations), default=0.0)
+        self.max_penetration_m = max(
+            (v.penetration_m for v in self.violations), default=0.0
+        )
+        self.violated_zones = sorted({v.zone_id for v in self.violations})
+        self.prohibited_zones = sorted({
+            v.zone_id for v in self.hard_violations
+            if v.violation_type == 'inside_zone'
+        })
+        self.ceiling_zones = sorted({
+            v.zone_id for v in self.hard_violations
+            if v.violation_type == 'above_ceiling'
+        })
+
+        for v in self.permit_violations:
+            self.permits_required[v.zone_id] = v.permit_family
+        counts: Dict[str, int] = {}
+        for v in self.permit_violations:
+            counts[v.zone_id] = counts.get(v.zone_id, 0) + 1
+        if self.n_samples > 0:
+            self.permit_exposure = {
+                k: n / self.n_samples for k, n in counts.items()
+            }
+
+        # Penalty covers hard violations only — permits are priced separately
+        # by the optimizer, which knows the regulatory profile's cost table.
+        for v in self.hard_violations:
+            w = ZONE_PENALTY_WEIGHTS.get(v.zone_type, 100.0)
+            if v.violation_type == 'above_ceiling':
+                self.total_penalty += w * (v.excess_m / 100.0)
+            else:
+                self.total_penalty += w * (1.0 + v.penetration_m / 500.0)
+
+    def permit_cost_with(self, profile: RegulatoryProfile = RDAC_101) -> float:
+        """Total permit effort under a given regulatory profile."""
+        return sum(
+            profile.permit_cost.get(fam, profile.permit_cost["generic"])
+            for fam in self.permits_required.values()
+        )
 
     def summary(self) -> str:
+        if self.feasible and not self.permits_required:
+            return "Airspace: CLEAR — no violations, no permits required"
+
+        lines = []
         if self.feasible:
-            return "Airspace: CLEAR — no violations"
-        lines = [
-            f"Airspace: {self.n_violations} VIOLATIONS across "
-            f"{len(self.violated_zones)} zone(s)",
-            f"  Max ceiling excess:      {self.max_excess_m:.1f} m",
-            f"  Max penetration depth:   {self.max_penetration_m:.1f} m",
-            f"  Total penalty:           {self.total_penalty:.1f}",
-            f"  Violated zones:          {', '.join(self.violated_zones)}",
-        ]
-        return '\n'.join(lines)
+            lines.append("Airspace: LEGAL WITH AUTHORISATION")
+        else:
+            lines.append(
+                f"Airspace: INFEASIBLE — {len(self.hard_violations)} hard "
+                f"violation(s)"
+            )
+            if self.prohibited_zones:
+                lines.append(f"  Prohibited zones entered: "
+                             f"{', '.join(self.prohibited_zones)}")
+            if self.ceiling_zones:
+                lines.append(f"  Ceiling exceeded in:      "
+                             f"{', '.join(self.ceiling_zones)}")
+                lines.append(f"  Max ceiling excess:       {self.max_excess_m:.1f} m")
+
+        if self.permits_required:
+            lines.append(f"  Permits required ({len(self.permits_required)}):")
+            for zid, fam in sorted(self.permits_required.items()):
+                exp = self.permit_exposure.get(zid, 0.0) * 100
+                lines.append(f"    - {zid:<28s} [{fam}]  {exp:.1f}% of route")
+        return "\n".join(lines)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -419,15 +645,14 @@ class AirspaceManager:
         -------
         List of ZoneViolation (empty if no violations).
         """
-        # Get terrain elevation (needed for AGL zones)
-        terrain_elev = 0.0
+        # Terrain elevation, needed for AGL zones. NaN (outside the DEM)
+        # is propagated rather than replaced with 0 — see _terrain_batch.
+        terrain_elev = np.nan
         if self.dem is not None:
             try:
-                terrain_elev = self.dem.elevation(lat, lon)
-                if np.isnan(terrain_elev):
-                    terrain_elev = 0.0
+                terrain_elev = float(self.dem.elevation(lat, lon))
             except Exception:
-                terrain_elev = 0.0
+                terrain_elev = np.nan
 
         violations = []
         for zone in self.active_zones():
@@ -439,7 +664,7 @@ class AirspaceManager:
 
     # ── Path checking ─────────────────────────────────────────────────
 
-    def check_path(self, path) -> AirspaceReport:
+    def check_path(self, path, with_penetration: bool = False) -> AirspaceReport:
         """
         Check a complete FlightPath against all active zones.
 
@@ -452,30 +677,81 @@ class AirspaceManager:
         path : FlightPath
             The path to check (must have waypoints populated).
 
+        Parameters
+        ----------
+        path : FlightPath
+            The path to check (must have waypoints populated).
+        with_penetration : bool
+            Also compute how deep inside each prohibited zone the route
+            goes. Off by default: it walks every polygon edge per
+            waypoint per zone and nothing in the constraint model needs
+            it. Turn it on for figures and reports.
+
         Returns
         -------
         AirspaceReport with aggregate violation metrics.
         """
-        all_violations = []
-
         waypoints = path.get_waypoints()
         if not waypoints:
             return AirspaceReport(violations=[])
 
-        for wp in waypoints:
-            terrain_elev = wp.terrain_elev if not np.isnan(wp.terrain_elev) else 0.0
-            if np.isnan(terrain_elev) and self.dem is not None:
-                try:
-                    terrain_elev = self.dem.elevation(wp.lat, wp.lon)
-                except Exception:
-                    terrain_elev = 0.0
+        lats = np.array([wp.lat for wp in waypoints])
+        lons = np.array([wp.lon for wp in waypoints])
+        alts = np.array([wp.alt for wp in waypoints])
 
-            for zone in self.active_zones():
-                v = zone.check_point(wp.lat, wp.lon, wp.alt, terrain_elev)
+        terrain = self._terrain_batch(lats, lons, waypoints)
+
+        all_violations = []
+        for zone in self.active_zones():
+            inside = zone.horizontal_contains_many(lats, lons)
+            if not inside.any():
+                continue
+            for i in np.flatnonzero(inside):
+                v = zone.check_point(lats[i], lons[i], alts[i], terrain[i],
+                                     with_penetration=with_penetration)
                 if v is not None:
                     all_violations.append(v)
 
-        return AirspaceReport(violations=all_violations)
+        return AirspaceReport(violations=all_violations,
+                              n_samples=len(waypoints))
+
+    def _terrain_batch(self, lats: np.ndarray, lons: np.ndarray,
+                       waypoints=None) -> np.ndarray:
+        """
+        Terrain elevation under each sample point [m AMSL].
+
+        AGL-referenced zones are meaningless without this. Resolving it
+        wrongly does not merely degrade the answer, it inverts it: with
+        terrain taken as 0, a 122 m AGL ceiling becomes a 122 m AMSL
+        ceiling, and every point of a Quito route sits ~2 800 m "above"
+        it. So the DEM is queried directly here rather than trusting
+        cached per-waypoint values, which callers may never have filled.
+
+        Points outside the DEM keep their cached elevation if one exists,
+        and are otherwise excluded (NaN) so that no zone check fires on
+        an invented ground level.
+        """
+        if self.dem is not None:
+            try:
+                terrain = np.asarray(
+                    self.dem.elevation_batch(lats, lons), dtype=float
+                )
+            except Exception:
+                terrain = np.full(len(lats), np.nan)
+        else:
+            terrain = np.full(len(lats), np.nan)
+
+        # Fall back to any elevation a previous analysis already attached.
+        if waypoints is not None:
+            missing = np.isnan(terrain)
+            if missing.any():
+                cached = np.array(
+                    [getattr(wp, 'terrain_elev', np.nan) for wp in waypoints],
+                    dtype=float,
+                )
+                terrain = np.where(missing, cached, terrain)
+
+        return terrain
 
     # ── Segment checking ──────────────────────────────────────────────
 
@@ -512,23 +788,22 @@ class AirspaceManager:
         """
         min_ceiling = float('inf')
 
-        terrain_elev = 0.0
+        terrain_elev = np.nan
         if self.dem is not None:
             try:
-                terrain_elev = self.dem.elevation(lat, lon)
-                if np.isnan(terrain_elev):
-                    terrain_elev = 0.0
+                terrain_elev = float(self.dem.elevation(lat, lon))
             except Exception:
-                terrain_elev = 0.0
+                terrain_elev = np.nan
 
         for zone in self.active_zones():
-            if zone.zone_type not in (ZoneType.ALTITUDE_LIMIT,
-                                       ZoneType.POPULATED_AREA):
+            if not zone.is_ceiling_zone:
                 continue
             if not zone.horizontal_contains(lat, lon):
                 continue
 
             if zone.is_agl:
+                if np.isnan(terrain_elev):
+                    continue
                 ceiling = terrain_elev + zone.altitude_ceiling_m
             else:
                 ceiling = zone.altitude_ceiling_m
@@ -540,9 +815,10 @@ class AirspaceManager:
     def is_prohibited(self, lat: float, lon: float) -> bool:
         """Check if a horizontal position is inside any prohibited zone."""
         for zone in self.active_zones():
-            if zone.zone_type in (ZoneType.PROHIBITED, ZoneType.ECOLOGICAL):
-                if zone.horizontal_contains(lat, lon):
-                    return True
+            if zone.permission != PermissionClass.PROHIBITED:
+                continue
+            if zone.horizontal_contains(lat, lon):
+                return True
         return False
 
     def get_clearance_to_zones(self, lat: float, lon: float
@@ -590,7 +866,7 @@ def load_airspace_from_file(filepath: str, dem=None) -> AirspaceManager:
 
     Example
     -------
-    >>> airspace = load_airspace_from_file('data/quito_airspace.json', dem=dem)
+    >>> airspace = load_airspace_from_file('data/ecuador_uas_zones.json', dem=dem)
     >>> report = airspace.check_path(flight_path)
     """
     import json
@@ -627,6 +903,21 @@ def load_airspace_from_file(filepath: str, dem=None) -> AirspaceManager:
             raise ValueError(f"Unknown geometry_type '{geo_type}' "
                              f"for zone '{zd['zone_id']}'")
 
+        # Permission may be stated explicitly; otherwise it follows from
+        # the zone type. Stating it matters when the source data already
+        # classifies a zone (Prohibida / Restringida), because that
+        # classification is the regulator's, not ours to infer.
+        permission = zd.get('permission')
+        if permission is not None:
+            try:
+                permission = PermissionClass(str(permission).lower())
+            except ValueError:
+                raise ValueError(
+                    f"Unknown permission '{zd['permission']}' for zone "
+                    f"'{zd['zone_id']}'. Valid: "
+                    f"{[p.value for p in PermissionClass]}"
+                )
+
         zones.append(AirspaceZone(
             zone_id=zd['zone_id'],
             zone_type=zone_type,
@@ -636,6 +927,10 @@ def load_airspace_from_file(filepath: str, dem=None) -> AirspaceManager:
             is_agl=zd.get('is_agl', False),
             buffer_m=zd.get('buffer_m', 0.0),
             description=zd.get('description', ''),
+            permission=permission,
+            permit_family=zd.get('permit_family'),
+            authority=zd.get('authority', ''),
+            citation=zd.get('citation', ''),
         ))
 
     return AirspaceManager(zones=zones, dem=dem)
@@ -643,29 +938,30 @@ def load_airspace_from_file(filepath: str, dem=None) -> AirspaceManager:
 
 def build_airspace(dem=None) -> AirspaceManager:
     """
-    Convenience function: load the Quito DMQ airspace from the bundled data file.
+    Load the bundled Ecuadorian zone set, for the DMQ case study.
 
-    Searches for 'quito_airspace.json' in common locations:
-        data/quito_airspace.json
-        ../data/quito_airspace.json
-        quito_airspace.json
-
-    For other regions, use load_airspace_from_file() directly with your own JSON.
+    The file is plain data — a snapshot of the published DGAC and MAATE
+    footprints, generated once by ``scripts/import_zones_ecuador.py``.
+    Nothing in the package imports anything Ecuador-specific, and no
+    country-specific package is a dependency: to plan somewhere else,
+    write a zone file for that place and load it with
+    :func:`load_airspace_from_file`. The regulation itself lives in
+    :mod:`raptor.regulations` as a swappable
+    :class:`~raptor.regulations.RegulatoryProfile`.
     """
     import os
-    search_paths = [
-        os.path.join(os.path.dirname(__file__), '..', 'data', 'quito_airspace.json'),
-        'data/quito_airspace.json',
-        '../data/quito_airspace.json',
-        'quito_airspace.json',
-    ]
-    for p in search_paths:
-        if os.path.exists(p):
-            return load_airspace_from_file(p, dem=dem)
+    here = os.path.dirname(__file__)
+    names = ['ecuador_uas_zones.json']
+    roots = [os.path.join(here, '..', 'data'), 'data', '../data', '.']
+    for name in names:
+        for root in roots:
+            p = os.path.join(root, name)
+            if os.path.exists(p):
+                return load_airspace_from_file(p, dem=dem)
 
     raise FileNotFoundError(
-        "Cannot find quito_airspace.json. Place it in data/ or provide "
-        "a custom airspace file via load_airspace_from_file()."
+        "Cannot find an airspace file. Expected one of "
+        f"{names} under data/, or pass your own to load_airspace_from_file()."
     )
 
 

@@ -59,17 +59,21 @@ class DEMInterface:
     def __init__(self, npz_path: str):
         data = np.load(npz_path, allow_pickle=True)
 
-        self.lat_grid = data['lat_grid']
-        self.lon_grid = data['lon_grid']
         self.elev_grid = data['elev_grid']
 
-        # 1D coordinate arrays
+        # 1D coordinate axes are the source of truth. The full coordinate
+        # meshes are optional: on a 30 m grid over a city they are three
+        # million points each, and they hold no information the axes do
+        # not — so they are rebuilt on demand instead of stored.
         if 'lat_1d' in data:
             self.lat_1d = data['lat_1d']
             self.lon_1d = data['lon_1d']
         else:
-            self.lat_1d = self.lat_grid[:, 0]
-            self.lon_1d = self.lon_grid[0, :]
+            self.lat_1d = data['lat_grid'][:, 0]
+            self.lon_1d = data['lon_grid'][0, :]
+
+        self._lat_grid = data['lat_grid'] if 'lat_grid' in data else None
+        self._lon_grid = data['lon_grid'] if 'lon_grid' in data else None
 
         # Optional derived fields
         self.slope_deg = data.get('slope_deg', None)
@@ -93,7 +97,7 @@ class DEMInterface:
         self._slope_interpolator = None
         if self.slope_deg is not None:
             slope_data = self.slope_deg
-            if self.lat_1d[0] > self.lat_grid[0, 0]:
+            if self._lat_grid is not None and self.lat_1d[0] > self._lat_grid[0, 0]:
                 slope_data = slope_data[::-1]
             self._slope_interpolator = RegularGridInterpolator(
                 (self.lat_1d, self.lon_1d),
@@ -122,6 +126,25 @@ class DEMInterface:
         )
 
     # ── Point queries ────────────────────────────────────────────────────
+
+    # ── Coordinate meshes ─────────────────────────────────────────────
+    #
+    # Kept lazy so a fine DEM does not carry two extra full-size arrays
+    # for the sake of callers that mostly want the 1-D axes anyway.
+
+    @property
+    def lat_grid(self) -> np.ndarray:
+        """Latitude of every cell, shape (n_lat, n_lon)."""
+        if self._lat_grid is None:
+            self._lon_grid, self._lat_grid = np.meshgrid(self.lon_1d, self.lat_1d)
+        return self._lat_grid
+
+    @property
+    def lon_grid(self) -> np.ndarray:
+        """Longitude of every cell, shape (n_lat, n_lon)."""
+        if self._lon_grid is None:
+            self._lon_grid, self._lat_grid = np.meshgrid(self.lon_1d, self.lat_1d)
+        return self._lon_grid
 
     def elevation(self, lat: float, lon: float) -> float:
         """
@@ -288,3 +311,54 @@ class DEMInterface:
                 f"lon=[{m.lon_min:.3f}, {m.lon_max:.3f}], "
                 f"shape=({m.n_lat}, {m.n_lon}), "
                 f"elev=[{m.elev_min:.0f}, {m.elev_max:.0f}] m)")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LOCATING A DEM
+# ═════════════════════════════════════════════════════════════════════════════
+
+#: Candidate DEM filenames, finest first. Scripts resolve through this so
+#: rebuilding the terrain at a better resolution takes effect everywhere
+#: without editing every entry point — and so nobody quietly keeps
+#: planning on a coarse grid because that is what a hard-coded path said.
+DEM_CANDIDATES = (
+    "dmq_dem_30m.npz",
+    "dmq_dem_90m.npz",
+    "dmq_dem.npz",
+)
+
+DEM_SEARCH_DIRS = ("data", ".", "../data", "..")
+
+
+def find_dem(candidates=None, search_dirs=None, verbose: bool = False) -> str:
+    """
+    Path to the best available DEM.
+
+    Prefers the finest grid present. Raises with a usable instruction
+    rather than a bare FileNotFoundError, because the fix — build one —
+    is a single command.
+    """
+    import os
+
+    candidates = candidates or DEM_CANDIDATES
+    search_dirs = search_dirs or DEM_SEARCH_DIRS
+
+    for name in candidates:
+        for d in search_dirs:
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                if verbose:
+                    print(f"DEM: {p}")
+                return p
+
+    raise FileNotFoundError(
+        "No DEM found. Looked for "
+        + ", ".join(candidates)
+        + " under " + ", ".join(search_dirs) + ".\n"
+        "Build one with:\n"
+        "  python -m scripts.build_dem tiles --tiff 'data/TIF_files/*.tif' "
+        "--bbox LAT_MIN LAT_MAX LON_MIN LON_MAX --spacing 30 --out data/dem.npz\n"
+        "or fetch terrain over the network:\n"
+        "  python -m scripts.build_dem corridor --from LAT LON --to LAT LON "
+        "--out data/corridor.npz"
+    )

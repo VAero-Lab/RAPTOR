@@ -24,6 +24,7 @@ from .routed_path import RoutedPath
 from .energy import AircraftEnergyParams, analyze_path_energy, MissionEnergyResult
 from .terrain import TerrainAnalyzer, TerrainReport
 from .airspace import AirspaceManager, AirspaceReport
+from .compliance import ComplianceAssessment, mission_compliance
 from .optimizer import PathOptimizer, OptMode, OptimizationResult
 from .scenarios import FlightScenario, MissionLeg, OptPriority
 
@@ -89,6 +90,23 @@ class MissionResult:
     # Constraint summary
     total_airspace_violations: int = 0
     total_terrain_violations: int = 0
+    #: Union of the authorisations every leg of this mission depends on.
+    #: Aggregated across legs because a permit is filed once for the
+    #: mission, not once per crossing.
+    permits_required: Dict[str, str] = field(default_factory=dict)
+    #: Graded regulatory standing of the mission as a whole — the worst
+    #: of its legs, with the filings unioned.
+    compliance: Optional[ComplianceAssessment] = None
+    #: Time spent on the ground loading, unloading and swapping packs [s].
+    #: Not propulsion energy, but it counts against a delivery window.
+    ground_time_s: float = 0.0
+    #: Battery swaps or recharges the mission depends on.
+    n_battery_actions: int = 0
+
+    @property
+    def total_elapsed_min(self) -> float:
+        """Wheels-up to wheels-down including ground time [min]."""
+        return self.total_time_min + self.ground_time_s / 60.0
 
     def __post_init__(self):
         if self.legs:
@@ -105,6 +123,13 @@ class MissionResult:
             self.total_terrain_violations = sum(
                 l.terrain_report.n_violations for l in self.legs
             )
+            for l in self.legs:
+                if l.airspace_report is not None:
+                    self.permits_required.update(l.airspace_report.permits_required)
+            assessments = [l.opt_result.compliance for l in self.legs
+                           if getattr(l.opt_result, 'compliance', None)]
+            if assessments:
+                self.compliance = mission_compliance(assessments)
 
     @property
     def battery_utilization(self) -> float:
@@ -135,6 +160,21 @@ class MissionResult:
         lines.append(f"\nFeasible: {'YES' if self.mission_feasible else 'NO'} | "
                       f"Battery util: {self.battery_utilization*100:.1f}% | "
                       f"SOC_min: {self.soc_min*100:.1f}%")
+        if self.ground_time_s > 0:
+            lines.append(
+                f"Flight time: {self.total_time_min:.1f} min | "
+                f"Ground time: {self.ground_time_s/60:.1f} min "
+                f"({self.n_battery_actions} battery action(s)) | "
+                f"Elapsed: {self.total_elapsed_min:.1f} min")
+        if self.compliance is not None:
+            lines.append("")
+            lines.append(self.compliance.filing_summary())
+        elif self.permits_required:
+            lines.append(f"Authorisations required ({len(self.permits_required)}):")
+            for zid, fam in sorted(self.permits_required.items()):
+                lines.append(f"  - {zid} [{fam}]")
+        else:
+            lines.append("Authorisations required: none")
         return "\n".join(lines)
 
 
@@ -190,8 +230,9 @@ class MissionPlanner:
         maxiter: int = 60,
         popsize: int = 12,
         use_airspace: bool = True,
-        seed: int = None,
+        seed: int = 42,
         verbose: bool = False,
+        stops: List = None,
     ) -> MissionResult:
         """
         Plan and optimize a complete multi-leg mission.
@@ -200,6 +241,20 @@ class MissionPlanner:
         leg k is the SOC at the end of leg k-1. This captures the
         cumulative energy coupling that makes multi-point missions
         harder than the sum of independent legs.
+
+        Parameters
+        ----------
+        stops : list of raptor.missions.Stop, optional
+            Ground operations between legs. Supplying them models the
+            thing that actually decides whether a multi-stop mission is
+            one flight or several: a stop that can swap the pack resets
+            the SOC, and one that cannot does not. Without them every
+            stop is assumed to be a touch-and-go.
+
+        Notes
+        -----
+        Prefer :meth:`plan` with a :class:`~raptor.missions.MissionPlan`,
+        which carries the stops and the payload sequence together.
         """
         t_start = time_module.time()
 
@@ -214,6 +269,14 @@ class MissionPlanner:
 
         current_soc = 1.0
         leg_results = []
+        ground_time = 0.0
+        n_battery_actions = 0
+        if stops is not None and len(stops) != len(scenario.legs) + 1:
+            raise ValueError(
+                f"stops has {len(stops)} entries but the scenario has "
+                f"{len(scenario.legs)} leg(s); a mission with N legs visits "
+                f"N+1 stops."
+            )
 
         for leg_idx, leg in enumerate(scenario.legs):
             if verbose:
@@ -244,7 +307,16 @@ class MissionPlanner:
                 maxiter=maxiter,
                 popsize=popsize,
                 verbose=False,
-                seed=seed + leg_idx if seed else None,
+                # Offset per leg so the legs do not all explore the same
+                # random sequence, but deterministic overall.
+                #
+                # This defaulted to None, which made every mission result
+                # irreproducible while single-leg results (seed=42) were
+                # not — so two runs of the same comparison could rank two
+                # missions in opposite orders, and the difference looked
+                # like a finding. `if seed` also silently discarded
+                # seed=0.
+                seed=(seed + leg_idx) if seed is not None else None,
             )
 
             # Evaluate the optimized path
@@ -257,6 +329,18 @@ class MissionPlanner:
             soc_start = current_soc
             energy_used_frac = energy_result.total_energy_wh / self.battery_wh
             soc_end = max(soc_start - energy_used_frac, 0.0)
+
+            # Ground operations at the stop this leg *arrives* at.
+            if stops is not None and leg_idx + 1 < len(stops):
+                arrival = stops[leg_idx + 1]
+                ground_time += arrival.recharge_time_s(soc_end)
+                if arrival.battery_action.restores_charge:
+                    n_battery_actions += 1
+                    soc_after_stop = 1.0
+                else:
+                    soc_after_stop = soc_end
+            else:
+                soc_after_stop = soc_end
 
             # Topology info
             topo = rp.topology_summary()
@@ -282,7 +366,7 @@ class MissionPlanner:
                       f"t={energy_result.total_time/60:.1f}min, "
                       f"SOC→{soc_end*100:.1f}%")
 
-            current_soc = soc_end
+            current_soc = soc_after_stop
 
         wall_time = time_module.time() - t_start
 
@@ -291,7 +375,22 @@ class MissionPlanner:
             legs=leg_results,
             wall_time_s=wall_time,
             battery_capacity_wh=self.battery_wh,
+            ground_time_s=ground_time,
+            n_battery_actions=n_battery_actions,
         )
+
+    def plan(self, mission, **kwargs) -> MissionResult:
+        """
+        Plan a :class:`~raptor.missions.MissionPlan`.
+
+        The payload each leg carries and what happens on the ground
+        between them both come from the plan's stops, so a collection
+        round is flown heavy at the end and a supply tour heavy at the
+        start — and a stop without a spare battery does not silently
+        get one.
+        """
+        return self.plan_mission(mission.to_scenario(),
+                                 stops=mission.stops, **kwargs)
 
     def check_feasibility(
         self,

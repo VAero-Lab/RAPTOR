@@ -52,6 +52,11 @@ from .energy import (
     AircraftEnergyParams, analyze_path_energy, MissionEnergyResult,
 )
 from .builder import PathBuilder, FacilityNode, PathStrategy
+from .regulations import (
+    RegulatoryProfile, OperationalContext, RDAC_101, MEDICAL_DELIVERY_CONTEXT,
+)
+from .penalties import PenaltyWeights, PenaltyBreakdown, evaluate_penalties
+from .compliance import ComplianceAssessment, ComplianceLevel, assess_compliance
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -96,6 +101,7 @@ class OptimizationResult:
     time_feasible: bool
     fully_feasible: bool
 
+
     # Convergence
     n_evaluations: int
     n_iterations: int
@@ -114,6 +120,34 @@ class OptimizationResult:
     message: str
     weights: Tuple[float, float] = (1.0, 0.0)
 
+    # ── Regulatory outcome ────────────────────────────────────────────
+    #: Path stays inside the AGL corridor (clearance floor and 101.185 ceiling).
+    ceiling_feasible: bool = True
+    #: Worst exceedance of the AGL ceiling [m].
+    max_ceiling_excess_m: float = 0.0
+    #: No prohibited zone entered and no ceiling busted.
+    airspace_feasible: bool = True
+    #: Prohibited zones the route still enters, if any.
+    prohibited_zones: List[str] = field(default_factory=list)
+    #: zone_id → permit family for every authorisation this route needs.
+    permits_required: Dict[str, str] = field(default_factory=dict)
+    #: Total permit effort under the active regulatory profile.
+    permit_cost: float = 0.0
+    #: Per-constraint penalty contributions of the final design.
+    penalties: Optional[PenaltyBreakdown] = None
+    #: Static compliance notes for the operation (payload, BVLOS, …).
+    compliance_notes: List[str] = field(default_factory=list)
+    #: Graded regulatory standing: compliant, needs authorisation, needs a
+    #: height waiver, or not flyable at all. Replaces the binary verdict —
+    #: "no legal path exists" and "needs a 103 m waiver over 1.4 km" are
+    #: different answers, and only one of them is actionable.
+    compliance: Optional[ComplianceAssessment] = None
+    #: Whether the starting path satisfied every constraint. When it did
+    #: not, the energy and time "improvements" below are measured against
+    #: a route that could not legally be flown, so a negative number is
+    #: the price of compliance rather than a failure to optimize.
+    initial_feasible: bool = True
+
     def summary(self) -> str:
         """Human-readable result summary."""
         lines = [
@@ -122,7 +156,9 @@ class OptimizationResult:
             "=" * 70,
             f"Weights: w_energy={self.weights[0]:.2f}, w_time={self.weights[1]:.2f}",
             f"",
-            f"{'Metric':<30s} {'Initial':>12s} {'Optimized':>12s} {'Change':>10s}",
+            (f"{'Metric':<30s} {'Initial':>12s} {'Optimized':>12s} {'Change':>10s}"
+             if self.initial_feasible else
+             f"{'Metric':<30s} {'Initial*':>12s} {'Optimized':>12s} {'Change':>10s}"),
             f"{'-'*64}",
             f"{'Energy [Wh]':<30s} {self.initial_energy_wh:>12.1f} "
             f"{self.energy_wh:>12.1f} {self.energy_improvement_pct:>+9.1f}%",
@@ -132,18 +168,58 @@ class OptimizationResult:
             f"{self.flight_time_s/60:>12.1f} {'':>10s}",
             f"{'SOC final [%]':<30s} {'—':>12s} {self.soc_final*100:>11.1f}%",
             f"{'Min AGL [m]':<30s} {'—':>12s} {self.min_agl:>12.1f}",
+            (None if self.initial_feasible else
+             "\n* the starting path violated a constraint, so these changes are\n"
+             "  measured against a route that could not legally be flown."),
             f"",
-            f"Terrain feasible:  {'✓' if self.terrain_feasible else '✗'}",
+            f"Terrain clearance: {'✓' if self.terrain_feasible else '✗'}",
+            f"AGL ceiling:       {'✓' if self.ceiling_feasible else '✗'}"
+            + (f"  (exceeded by {self.max_ceiling_excess_m:.0f} m)"
+               if not self.ceiling_feasible else ""),
+            f"Airspace:          {'✓' if self.airspace_feasible else '✗'}"
+            + (f"  (prohibited: {', '.join(self.prohibited_zones)})"
+               if self.prohibited_zones else ""),
             f"Battery feasible:  {'✓' if self.battery_feasible else '✗'}",
             f"Time feasible:     {'✓' if self.time_feasible else '✗'}",
             f"Fully feasible:    {'✓' if self.fully_feasible else '✗'}",
             f"",
+            self._permit_block(),
             f"Evaluations: {self.n_evaluations}",
             f"Generations: {self.n_iterations}",
             f"Wall time:   {self.wall_time_s:.1f} s",
             f"Converged:   {'Yes' if self.success else 'No'} — {self.message}",
         ]
-        return "\n".join(lines)
+        return "\n".join(l for l in lines if l is not None)
+
+    def _permit_block(self) -> str:
+        """The authorisations this plan depends on."""
+        waiver = self.compliance.height_waiver if self.compliance else None
+        if not self.permits_required:
+            if waiver is None:
+                return "Authorisations:    none required\n"
+            return ("Authorisations:    height waiver only\n  "
+                    + waiver.summary().replace("\n", "\n  ") + "\n")
+        lines = [f"Authorisations:    {len(self.permits_required)} "
+                 f"(effort {self.permit_cost:.0f})"]
+        for zid, fam in sorted(self.permits_required.items()):
+            lines.append(f"  - {zid:<28s} [{fam}]")
+        for note in self.compliance_notes:
+            lines.append(f"  ! {note}")
+        if self.compliance is not None and self.compliance.height_waiver:
+            lines.append("  " + self.compliance.height_waiver.summary()
+                         .replace("\n", "\n  "))
+        return "\n".join(lines) + "\n"
+
+    @property
+    def regulatory_summary(self) -> str:
+        """Compact one-line verdict, for tables and logs."""
+        if self.compliance is not None:
+            return self.compliance.verdict()
+        if not self.fully_feasible:
+            return "INFEASIBLE"
+        if self.permits_required:
+            return f"LEGAL with {len(self.permits_required)} authorisation(s)"
+        return "LEGAL, no authorisation required"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -177,6 +253,10 @@ class PathOptimizer:
         uav: UAVConfig,
         constraints: MissionConstraints,
         ac_params: AircraftEnergyParams,
+        regulation: RegulatoryProfile = RDAC_101,
+        context: OperationalContext = None,
+        penalty_weights: PenaltyWeights = None,
+        warn_on_bad_constraints: bool = True,
     ):
         self.dem = dem
         self.uav = uav
@@ -184,12 +264,64 @@ class PathOptimizer:
         self.ac_params = ac_params
         self.terrain_analyzer = TerrainAnalyzer(dem, constraints)
 
-        # Penalty weights (tuned for problem scale)
-        # These must be large enough to dominate the normalized [0,1] objective
-        self.penalty_terrain = 500.0     # terrain violation (must dominate)
-        self.penalty_soc = 100.0         # SOC below minimum
-        self.penalty_time = 20.0         # time exceeding limit
-        self.penalty_endpoint = 10.0     # endpoint altitude mismatch
+        #: Which rulebook applies, and under what credentials.
+        self.regulation = regulation
+        self.context = context if context is not None else MEDICAL_DELIVERY_CONTEXT
+        #: How each constraint converts into objective units.
+        self.penalty_weights = penalty_weights or PenaltyWeights()
+
+        # A constraint set whose vertical corridor is empty makes every
+        # path infeasible no matter how well it is routed. That failure is
+        # silent and looks like an optimizer problem, so say it out loud.
+        self.constraint_problems = constraints.validate()
+        if warn_on_bad_constraints and self.constraint_problems:
+            for msg in self.constraint_problems:
+                warnings.warn(f"MissionConstraints: {msg}", stacklevel=2)
+
+        # Legacy scalar weights, retained so existing scripts that poke at
+        # them keep running; the penalty model above is what is used.
+        self.penalty_terrain = 500.0
+        self.penalty_soc = 100.0
+        self.penalty_time = 20.0
+        self.penalty_endpoint = 10.0
+
+    # ── Shared constraint evaluation ──────────────────────────────────────
+
+    def _score(self, fp: FlightPath, energy_result, min_soc: float,
+               max_flight_time: float, airspace=None,
+               ceiling_waivable: bool = False) -> PenaltyBreakdown:
+        """
+        Evaluate every constraint for one candidate path.
+
+        Both optimizers route through here, so the penalty that steers the
+        search and the verdict reported at the end are computed from the
+        same numbers — a mismatch between the two is what lets a design be
+        penalty-free and infeasible at the same time.
+        """
+        terrain_report = self.terrain_analyzer.analyze(fp)
+        air_report = airspace.check_path(fp) if airspace is not None else None
+
+        alt_error = 0.0
+        end_state = fp.end_state
+        if end_state is not None:
+            alt_error = abs(end_state.alt - fp.destination[2])
+
+        b = evaluate_penalties(
+            terrain_report=terrain_report,
+            airspace_report=air_report,
+            soc_final=energy_result.SOC_final,
+            min_soc=min_soc,
+            flight_time_s=energy_result.total_time,
+            max_flight_time_s=max_flight_time,
+            endpoint_alt_error_m=alt_error,
+            weights=self.penalty_weights,
+            regulation=self.regulation,
+            context=self.context,
+            ceiling_waivable=ceiling_waivable,
+        )
+        b.terrain_report = terrain_report
+        b.airspace_report = air_report
+        return b
 
         # Tracking
         self._eval_count = 0
@@ -265,13 +397,15 @@ class PathOptimizer:
             w_time = w_time if w_time is not None else 0.5
 
         # Create aircraft params with payload
-        ac = copy.deepcopy(self.ac_params)
-        ac.m_tow = self.ac_params.m_tow + payload_kg
+        ac = self.ac_params.with_payload(payload_kg)
 
         # ── Get initial solution metrics ──────────────────────────────────
         initial_energy = analyze_path_energy(initial_path, ac, SOC_min=min_soc)
         initial_energy_wh = initial_energy.total_energy_wh
         initial_time_s = initial_energy.total_time
+        initial_feasible = self._score(
+            initial_path, initial_energy, min_soc, max_flight_time
+        ).feasible
 
         # ── Normalization scales (for multi-objective) ────────────────────
         # Scale objectives to [0, 1] range approximately
@@ -332,56 +466,14 @@ class PathOptimizer:
                 t_s = energy_result.total_time
                 soc_final = energy_result.SOC_final
 
-                # ── Evaluate terrain constraints ──────────────────
-                terrain_report = self.terrain_analyzer.analyze(path_template)
-                terrain_penalty = terrain_report.constraint_penalty
+                # ── Normalized objectives ─────────────────────────
+                f_obj = w_energy * (E_wh / E_scale) + w_time * (t_s / T_scale)
 
-                # ── Build penalized objective ─────────────────────
-                # Normalized objectives
-                f_energy = E_wh / E_scale
-                f_time = t_s / T_scale
+                # ── Constraints ───────────────────────────────────
+                b = self._score(path_template, energy_result,
+                                min_soc, max_flight_time)
 
-                # Weighted objective
-                f_obj = w_energy * f_energy + w_time * f_time
-
-                # ── Constraint penalties ──────────────────────────
-                penalty = 0.0
-
-                # Terrain clearance: aggressive barrier
-                if terrain_penalty > 0:
-                    n_wp = max(len(terrain_report.agl_profile), 1)
-                    # Max violation in meters
-                    agl = terrain_report.agl_profile
-                    valid = ~np.isnan(agl)
-                    if np.any(valid):
-                        clearance_req = 50.0  # min AGL
-                        deficits = np.maximum(clearance_req - agl[valid], 0)
-                        max_deficit = np.max(deficits)
-                        frac_violated = np.sum(deficits > 0) / np.sum(valid)
-                        # Strong penalty: proportional to max deficit + fraction
-                        penalty += self.penalty_terrain * (
-                            max_deficit / 100.0 + frac_violated * 5.0
-                        )
-
-                # SOC below minimum
-                soc_deficit = min_soc - soc_final
-                if soc_deficit > 0:
-                    penalty += self.penalty_soc * soc_deficit
-
-                # Time exceeding limit
-                time_excess = t_s - max_flight_time
-                if time_excess > 0:
-                    penalty += self.penalty_time * (time_excess / max_flight_time)
-
-                # Endpoint altitude: final segment should end near destination
-                end_state = path_template.end_state
-                if end_state is not None:
-                    dest_elev = path_template.destination[2]
-                    alt_error = abs(end_state.alt - dest_elev)
-                    if alt_error > 100:  # allow 100m tolerance
-                        penalty += self.penalty_endpoint * (alt_error / 1000)
-
-                return f_obj + penalty
+                return f_obj + b.total
 
             except Exception:
                 return 1e10  # Return large value on failure
@@ -447,7 +539,9 @@ class PathOptimizer:
 
         # Final evaluations
         final_energy = analyze_path_energy(path_template, ac, SOC_min=min_soc)
-        final_terrain = self.terrain_analyzer.analyze(path_template)
+        final_b = self._score(path_template, final_energy,
+                              min_soc, max_flight_time)
+        final_terrain = final_b.terrain_report
 
         # Compute improvements
         energy_imp = ((initial_energy_wh - final_energy.total_energy_wh)
@@ -468,9 +562,17 @@ class PathOptimizer:
             soc_final=final_energy.SOC_final,
             battery_feasible=final_energy.SOC_final >= min_soc,
             time_feasible=final_energy.total_time <= max_flight_time,
-            fully_feasible=(final_terrain.is_feasible and
-                           final_energy.SOC_final >= min_soc and
-                           final_energy.total_time <= max_flight_time),
+            fully_feasible=final_b.feasible,
+            ceiling_feasible=final_terrain.ceiling_feasible,
+            max_ceiling_excess_m=final_terrain.max_ceiling_excess,
+            penalties=final_b,
+            compliance=assess_compliance(
+                final_path, final_terrain, final_air,
+                regulation=self.regulation, context=self.context,
+                constraints=self.constraints,
+            ),
+            compliance_notes=self.context.compliance_findings(self.regulation),
+            initial_feasible=initial_feasible,
             n_evaluations=self._eval_count,
             n_iterations=self._generation,
             wall_time_s=wall_time,
@@ -682,8 +784,7 @@ class PathOptimizer:
 
         Returns a dict with all key metrics.
         """
-        ac = copy.deepcopy(self.ac_params)
-        ac.m_tow = self.ac_params.m_tow + payload_kg
+        ac = self.ac_params.with_payload(payload_kg)
 
         energy = analyze_path_energy(path, ac, SOC_min=min_soc)
         terrain = self.terrain_analyzer.analyze(path)
@@ -715,6 +816,9 @@ class PathOptimizer:
         tol: float = 1e-4,
         seed: int = 42,
         verbose: bool = True,
+        feasibility_first: bool = True,
+        feasibility_maxiter: int = None,
+        allow_height_waiver: bool = False,
     ) -> OptimizationResult:
         """
         Optimize a RoutedPath: jointly searches over lateral routing
@@ -753,6 +857,25 @@ class PathOptimizer:
             Random seed.
         verbose : bool
             Print progress.
+        feasibility_first : bool
+            When the starting route violates a constraint, run a short
+            search on the constraint penalty alone before optimizing
+            energy. Minimising ``energy + penalty`` from an infeasible
+            start asks the optimizer to do two things at once, and cheap
+            infeasible routes routinely outscore expensive legal ones
+            long enough for the population to converge around them. A
+            feasible seed removes the ambiguity.
+        feasibility_maxiter : int
+            Generations for that first stage. Defaults to half of
+            ``maxiter``.
+        allow_height_waiver : bool
+            Treat the AGL ceiling as waivable under RDAC 101.035 instead
+            of absolute. Over terrain that outruns the aircraft's descent
+            rate no compliant profile exists at any altitude, and the
+            strict search then has nothing to rank; this mode finds the
+            route needing the *least* height relief and reports it as a
+            waiver to file. Prohibited airspace stays hard regardless.
+            :meth:`plan_route` tries strict first and falls back to this.
 
         Returns
         -------
@@ -773,14 +896,17 @@ class PathOptimizer:
             w_time = w_time if w_time is not None else 0.5
 
         # Aircraft params with payload
-        ac = copy.deepcopy(self.ac_params)
-        ac.m_tow = self.ac_params.m_tow + payload_kg
+        ac = self.ac_params.with_payload(payload_kg)
 
         # ── Initial solution metrics ─────────────────────────────────
         initial_path = routed_path.flight_path
         initial_energy = analyze_path_energy(initial_path, ac, SOC_min=min_soc)
         initial_energy_wh = initial_energy.total_energy_wh
         initial_time_s = initial_energy.total_time
+        initial_feasible = self._score(
+            initial_path, initial_energy, min_soc, max_flight_time,
+            airspace=airspace, ceiling_waivable=allow_height_waiver,
+        ).feasible
 
         E_scale = max(initial_energy_wh, 50.0)
         T_scale = max(initial_time_s, 60.0)
@@ -818,9 +944,6 @@ class PathOptimizer:
         self._parameter_history = []
         self._generation = 0
 
-        # ── Airspace penalty weight ──────────────────────────────────
-        penalty_airspace = 500.0  # Strong penalty to enforce zone avoidance
-
         # ── Objective function ───────────────────────────────────────
         def objective(theta: np.ndarray) -> float:
             self._eval_count += 1
@@ -838,57 +961,21 @@ class PathOptimizer:
                 t_s = energy_result.total_time
                 soc_final = energy_result.SOC_final
 
-                # ── Terrain constraints ──────────────────────
-                terrain_report = self.terrain_analyzer.analyze(fp)
-
                 # ── Normalized objectives ────────────────────
-                f_energy = E_wh / E_scale
-                f_time = t_s / T_scale
-                f_obj = w_energy * f_energy + w_time * f_time
+                f_obj = w_energy * (E_wh / E_scale) + w_time * (t_s / T_scale)
 
-                # ── Constraint penalties ─────────────────────
-                penalty = 0.0
+                # ── Constraints, including airspace ──────────
+                # Prohibited zones and ceiling busts are scored as graded,
+                # finite penalties rather than a 1e6 wall. A wall flattens
+                # the landscape: every infeasible design scores the same,
+                # so DE cannot tell a route that clips a zone corner from
+                # one that flies straight through, and never learns which
+                # way to move. Graded penalties leave a slope to descend.
+                b = self._score(fp, energy_result, min_soc,
+                                max_flight_time, airspace=airspace,
+                                ceiling_waivable=allow_height_waiver)
 
-                # Terrain clearance
-                if terrain_report.constraint_penalty > 0:
-                    agl = terrain_report.agl_profile
-                    valid = ~np.isnan(agl)
-                    if np.any(valid):
-                        clearance_req = 50.0
-                        deficits = np.maximum(clearance_req - agl[valid], 0)
-                        max_deficit = np.max(deficits)
-                        frac_violated = np.sum(deficits > 0) / np.sum(valid)
-                        penalty += self.penalty_terrain * (
-                            max_deficit / 100.0 + frac_violated * 5.0
-                        )
-
-                # SOC below minimum
-                soc_deficit = min_soc - soc_final
-                if soc_deficit > 0:
-                    penalty += self.penalty_soc * soc_deficit
-
-                # Time exceeding limit
-                time_excess = t_s - max_flight_time
-                if time_excess > 0:
-                    penalty += self.penalty_time * (time_excess / max_flight_time)
-
-                # ── Airspace constraints ───────────────────
-                if airspace is not None:
-                    air_report = airspace.check_path(fp)
-                    if not air_report.feasible:
-                        # Separate hard barriers (PROHIBITED) from soft penalties
-                        from .airspace import ZoneType
-                        hard_violations = sum(
-                            1 for v in air_report.violations
-                            if v.zone_type in (ZoneType.PROHIBITED, ZoneType.AERODROME_CTR)
-                        )
-                        if hard_violations > 0:
-                            # PROHIBITED/AERODROME: absolute barrier
-                            penalty += 1e6 * hard_violations
-                        # Graduated penalty for all zones
-                        penalty += penalty_airspace * air_report.total_penalty
-
-                return f_obj + penalty
+                return f_obj + b.total
 
             except Exception:
                 return 1e10
@@ -923,9 +1010,60 @@ class PathOptimizer:
                           f"obj={self._best_obj:.4f} | "
                           f"conv={convergence:.4f}")
 
-        # ── Run DE ───────────────────────────────────────────────────
+        # ── Stage 1: find something legal to start from ──────────────
         t_start = time_module.time()
+        feas_evals = 0
 
+        def constraint_only(theta: np.ndarray) -> float:
+            """Constraint violation alone — no energy, no time."""
+            try:
+                routed_path.parameter_vector = theta
+                fp_c = routed_path.flight_path
+                er = analyze_path_energy(fp_c, ac, SOC_min=min_soc)
+                return self._score(fp_c, er, min_soc, max_flight_time,
+                                   airspace=airspace,
+                                   ceiling_waivable=allow_height_waiver).total
+            except Exception:
+                return 1e10
+
+        if feasibility_first and constraint_only(theta_0) > 0:
+            fmax = (feasibility_maxiter if feasibility_maxiter is not None
+                    else max(maxiter // 2, 10))
+            if verbose:
+                print(f"  Stage 1/2 — restoring feasibility "
+                      f"({fmax} generations)")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                feas = differential_evolution(
+                    constraint_only,
+                    bounds=bounds,
+                    x0=theta_0,
+                    maxiter=fmax,
+                    popsize=max(popsize // 2, 4),
+                    tol=tol,
+                    seed=seed,
+                    polish=False,
+                    mutation=(0.5, 1.0),
+                    recombination=0.8,
+                    strategy='best1bin',
+                    atol=0.0,
+                    updating='deferred',
+                    workers=1,
+                )
+            feas_evals = int(getattr(feas, 'nfev', 0))
+            if feas.fun < constraint_only(theta_0):
+                theta_0 = np.clip(
+                    feas.x,
+                    [b[0] for b in bounds],
+                    [b[1] for b in bounds],
+                )
+            if verbose:
+                status = "feasible" if feas.fun <= 0 else f"penalty {feas.fun:.3f}"
+                print(f"  Stage 1 done — {status}")
+                print(f"  Stage 2/2 — minimising {mode.value} "
+                      f"({maxiter} generations)")
+
+        # ── Stage 2: optimize the objective from that seed ───────────
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             result = differential_evolution(
@@ -947,20 +1085,32 @@ class PathOptimizer:
             )
 
         wall_time = time_module.time() - t_start
+        self._eval_count += feas_evals
 
         # ── Decode final solution ────────────────────────────────────
+        # `polish` runs an L-BFGS-B pass that ignores the bounds' meaning
+        # for the penalty landscape and can return a point worse than the
+        # population best, so keep whichever actually scores better.
         theta_opt = result.x
+        if objective(np.asarray(result.x)) > objective(np.asarray(theta_0)):
+            theta_opt = theta_0
         routed_path.parameter_vector = theta_opt
         final_path = routed_path.flight_path
 
         final_energy = analyze_path_energy(final_path, ac, SOC_min=min_soc)
-        final_terrain = self.terrain_analyzer.analyze(final_path)
+        final_b = self._score(final_path, final_energy, min_soc,
+                              max_flight_time, airspace=airspace,
+                              ceiling_waivable=allow_height_waiver)
+        final_terrain = final_b.terrain_report
+        final_air = final_b.airspace_report
 
-        # Airspace check on final solution
-        airspace_feasible = True
-        if airspace is not None:
-            final_air = airspace.check_path(final_path)
-            airspace_feasible = final_air.feasible
+        airspace_feasible = final_air.feasible if final_air is not None else True
+        permits = dict(final_b.permits_required)
+        permit_cost = sum(
+            self.regulation.permit_cost.get(
+                fam, self.regulation.permit_cost["generic"])
+            for fam in permits.values()
+        )
 
         energy_imp = ((initial_energy_wh - final_energy.total_energy_wh)
                       / initial_energy_wh * 100) if initial_energy_wh > 0 else 0
@@ -980,10 +1130,26 @@ class PathOptimizer:
             soc_final=final_energy.SOC_final,
             battery_feasible=final_energy.SOC_final >= min_soc,
             time_feasible=final_energy.total_time <= max_flight_time,
-            fully_feasible=(final_terrain.is_feasible and
-                           final_energy.SOC_final >= min_soc and
-                           final_energy.total_time <= max_flight_time and
-                           airspace_feasible),
+            # Needing a permit does not make a route infeasible — that is
+            # the distinction RDAC 101.190 draws between restricted and
+            # prohibited airspace, and collapsing it would reject perfectly
+            # flyable plans over paperwork.
+            fully_feasible=final_b.feasible,
+            ceiling_feasible=final_terrain.ceiling_feasible,
+            max_ceiling_excess_m=final_terrain.max_ceiling_excess,
+            airspace_feasible=airspace_feasible,
+            prohibited_zones=(final_air.prohibited_zones
+                              if final_air is not None else []),
+            permits_required=permits,
+            permit_cost=permit_cost,
+            penalties=final_b,
+            compliance=assess_compliance(
+                final_path, final_terrain, final_air,
+                regulation=self.regulation, context=self.context,
+                constraints=self.constraints,
+            ),
+            compliance_notes=self.context.compliance_findings(self.regulation),
+            initial_feasible=initial_feasible,
             n_evaluations=self._eval_count,
             n_iterations=self._generation,
             wall_time_s=wall_time,
@@ -1006,14 +1172,140 @@ class PathOptimizer:
             print(f"    Max lateral dev:    {topo['max_lateral_deviation_m']:.0f} m")
             print(f"    Route stretch:      {topo['route_stretch_factor']:.3f}x")
             print(f"    Direct path:        {topo['is_direct']}")
-            if airspace is not None:
-                final_air = airspace.check_path(final_path)
+            print(f"    Corridor mode:      {topo.get('corridor_mode', 'amsl')}")
+            if topo.get('cruise_agl_m'):
+                agls = ', '.join(f"{a:.0f}" for a in topo['cruise_agl_m'])
+                print(f"    Cruise height:      {agls} m AGL")
+            if final_air is not None:
                 print(f"    Airspace feasible:  {final_air.feasible}")
                 if not final_air.feasible:
-                    print(f"    Violations:         {final_air.n_violations} "
-                          f"in {final_air.violated_zones}")
+                    print(f"    Hard violations:    "
+                          f"{len(final_air.hard_violations)} in "
+                          f"{final_air.prohibited_zones + final_air.ceiling_zones}")
+            print()
+            print(final_b.summary())
 
         return opt_result
+
+    # ── Planning entry point: strict first, waiver only if needed ─────
+
+    def plan_route(
+        self,
+        routed_path,
+        mode: OptMode = OptMode.ENERGY,
+        payload_kg: float = 0.0,
+        max_flight_time: float = None,
+        min_soc: float = 0.15,
+        airspace=None,
+        maxiter: int = 100,
+        popsize: int = 20,
+        seed: int = 42,
+        verbose: bool = True,
+        allow_waiver_fallback: bool = True,
+        seed_with_astar: bool = True,
+        astar_resolution_m: float = 400.0,
+        **kwargs,
+    ) -> OptimizationResult:
+        """
+        Plan a route, escalating through the regulation rather than failing.
+
+        Runs the strict search first. If it produces a compliant plan —
+        with or without authorisations — that is the answer, because a
+        route that needs no waiver is always preferable to one that does.
+
+        If it does not, and the only thing standing in the way is the
+        height ceiling, the search is repeated with the ceiling treated
+        as waivable. That second pass does not ignore the rule: it
+        minimises the relief needed, so the result carries the smallest
+        height waiver that makes the corridor flyable, quantified for a
+        filing under RDAC 101.035.
+
+        The fallback is deliberately *not* attempted when prohibited
+        airspace is the blocker. There is no waiver for 101.190(b), so
+        relaxing anything else would only produce a route that is still
+        illegal but now looks acceptable — the worst possible output.
+
+        Parameters
+        ----------
+        allow_waiver_fallback : bool
+            Set False to keep the strict verdict and let the caller
+            decide what to do with an infeasible corridor.
+        seed_with_astar : bool
+            Start the search from an A* route rather than the direct
+            line. A* already knows how to get round a prohibited zone;
+            without it, differential evolution spends its early
+            generations rediscovering that a detour is needed at all.
+        astar_resolution_m : float
+            Grid resolution for the seeding search. Coarse is fine — it
+            only has to find the right side of the obstacle.
+
+        Returns
+        -------
+        OptimizationResult whose ``compliance`` grades the outcome.
+        """
+        if seed_with_astar and routed_path.n_intermediate > 0:
+            from .astar_baseline import AStarGridPlanner
+            ac_seed = self.ac_params.with_payload(payload_kg)
+            planner = AStarGridPlanner(
+                self.dem, ac_seed, airspace=airspace,
+                grid_resolution_m=astar_resolution_m,
+            )
+            if verbose:
+                print("  Seeding from A* grid search...")
+            routed_path.seed_from_astar(planner, verbose=verbose)
+
+        strict = self.optimize_routed(
+            routed_path, mode=mode, payload_kg=payload_kg,
+            max_flight_time=max_flight_time, min_soc=min_soc,
+            airspace=airspace, maxiter=maxiter, popsize=popsize,
+            seed=seed, verbose=verbose, allow_height_waiver=False, **kwargs,
+        )
+
+        if strict.fully_feasible or not allow_waiver_fallback:
+            return strict
+
+        blocked = strict.compliance.blocking_zones if strict.compliance else []
+        if blocked:
+            if verbose:
+                print(f"\n  No waiver applies: the route enters prohibited "
+                      f"airspace ({', '.join(blocked)}).")
+                print(f"  RDAC 101.190(b) admits no exception — the route must "
+                      f"change, not the paperwork.")
+            return strict
+
+        if not strict.ceiling_feasible:
+            # Attempt the fallback even when terrain clearance is also
+            # violated. The relaxed pass still penalises the floor — it
+            # only stops treating the ceiling as fatal — so it can fix
+            # both at once. Refusing to try because a second constraint
+            # is unmet leaves the corridor reported as impossible when a
+            # perfectly filable route exists.
+            if verbose:
+                print(f"\n  No compliant profile exists on this corridor "
+                      f"(ceiling exceeded by "
+                      f"{strict.max_ceiling_excess_m:.0f} m).")
+                print(f"  Re-planning for the smallest height waiver that "
+                      f"makes it flyable...")
+            relaxed = self.optimize_routed(
+                routed_path, mode=mode, payload_kg=payload_kg,
+                max_flight_time=max_flight_time, min_soc=min_soc,
+                airspace=airspace, maxiter=maxiter, popsize=popsize,
+                seed=seed, verbose=verbose, allow_height_waiver=True, **kwargs,
+            )
+            if verbose and not relaxed.terrain_feasible:
+                print(f"\n  Terrain clearance is still violated "
+                      f"({relaxed.compliance.clearance_violations} waypoint(s), "
+                      f"lowest {relaxed.compliance.min_agl_m:.0f} m AGL). "
+                      f"That is a safety floor, not a regulatory limit, and no "
+                      f"waiver covers it — the route needs re-planning.")
+            return relaxed
+
+        if verbose and not strict.terrain_feasible:
+            print(f"\n  Terrain clearance is violated "
+                  f"({strict.compliance.clearance_violations} waypoint(s), "
+                  f"lowest {strict.compliance.min_agl_m:.0f} m AGL). That is a "
+                  f"safety floor, not a regulatory limit, and is not waivable.")
+        return strict
 
     # ── Pareto sweep for routed paths ─────────────────────────────────
 

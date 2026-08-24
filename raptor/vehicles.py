@@ -72,29 +72,283 @@ class AircraftEnergyParams:
     C_d_blade: float = 0.012         # Mean blade drag coefficient
     k_i: float = 1.15                # Induced power correction factor
 
+    # --- Rotor count (disk area is TOTAL across all lift rotors) ---
+    n_rotors: int = 4                # Number of lift rotors
+
     # --- Propulsion ---
-    eta_prop: float = 0.6            # Overall propulsion efficiency
+    eta_prop: float = 0.6            # Overall propulsion efficiency (fallback)
+    #: Efficiency of the lift-rotor drivetrain (motor × ESC × rotor). Hover
+    #: figure-of-merit and cruise propeller efficiency are different numbers
+    #: on a lift+cruise airframe; a single value biases whichever phase
+    #: dominates the mission. ``None`` falls back to ``eta_prop``.
+    eta_vtol: Optional[float] = None
+    #: Efficiency of the cruise propulsor. ``None`` falls back to ``eta_prop``.
+    eta_cruise: Optional[float] = None
 
     # --- Battery ---
     battery_mass: float = 3.0        # Battery mass [kg]
     specific_energy: float = 200.0   # Battery specific energy [Wh/kg]
     battery_voltage: float = 22.2    # Nominal battery voltage [V] (6S LiPo)
     battery_capacity_mah: float = 0.0  # If 0, auto-computed from mass & specific energy
+    #: Fraction of nameplate energy actually deliverable. Pack overhead,
+    #: the unusable tail below the cut-off voltage and cell mismatch all
+    #: sit between the cell datasheet and what the aircraft can draw.
+    battery_usable_fraction: float = 0.88
+    #: Continuous discharge limit [C]. Exceeding it is not modelled as a
+    #: hard failure, but it is reported — a design that only closes by
+    #: pulling 15 C continuously has not really closed.
+    battery_max_c_rate: float = 10.0
+    #: Cells in series. Sets the open-circuit voltage curve; 6S LiPo is
+    #: 25.2 V full, 22.2 V nominal, ~19.8 V empty.
+    battery_cells_series: int = 6
+    #: Nominal capacity of one cell [Ah], used to infer how many strings
+    #: are in parallel and hence the pack's internal resistance.
+    cell_capacity_ah: float = 5.0
+    #: Internal resistance of one cell [Ω] at room temperature.
+    cell_internal_resistance_ohm: float = 0.004
+    #: Pack internal resistance [Ω]. ``None`` derives it from the cell
+    #: figures and the series/parallel layout.
+    battery_internal_resistance_ohm: Optional[float] = None
+
+    # --- Wing section (used to build a computed drag polar) ---
+    airfoil: str = "naca4412"        # section name for the aero model
+    taper_ratio: float = 1.0
+    twist_tip_deg: float = 0.0       # washout is negative
 
     # --- Metadata (set by from_json / factory functions) ---
     name: str = "Baseline Medical Delivery"
     description: str = ""
 
     def __post_init__(self):
-        """Compute derived aerodynamic and battery quantities."""
-        self.W = self.m_tow * self.g
-        self.k_drag = 1.0 / (np.pi * self.e_oswald * self.AR)
-        self.C_D = self.C_D0 + self.k_drag * self.C_L ** 2
+        """Fill in the battery capacity if it was not given explicitly."""
         if self.battery_capacity_mah <= 0:
             energy_wh = self.battery_mass * self.specific_energy
             self.battery_capacity_mah = energy_wh / self.battery_voltage * 1000.0
-        self.battery_energy_wh = self.battery_mass * self.specific_energy
-        self.battery_energy_j = self.battery_energy_wh * 3600.0
+
+    # ── Derived quantities ────────────────────────────────────────────────
+    #
+    # These are properties, not attributes computed once in __post_init__.
+    # The optimizer models payload by raising ``m_tow`` on a copy of the
+    # vehicle; with a cached ``W`` that assignment changed nothing at all,
+    # so every payload the package has ever flown weighed the same as an
+    # empty aircraft. Deriving on read makes that class of bug impossible.
+
+    @property
+    def W(self) -> float:
+        """Weight [N]. Tracks ``m_tow``."""
+        return self.m_tow * self.g
+
+    @property
+    def k_drag(self) -> float:
+        """Induced-drag factor 1/(π·e·AR)."""
+        return 1.0 / (np.pi * self.e_oswald * self.AR)
+
+    @property
+    def C_D(self) -> float:
+        """Drag coefficient at the reference cruise ``C_L``."""
+        return self.C_D0 + self.k_drag * self.C_L ** 2
+
+    @property
+    def battery_energy_wh(self) -> float:
+        """Nameplate pack energy [Wh]."""
+        return self.battery_mass * self.specific_energy
+
+    @property
+    def battery_energy_j(self) -> float:
+        return self.battery_energy_wh * 3600.0
+
+    @property
+    def battery_capacity_ah(self) -> float:
+        return self.battery_capacity_mah / 1000.0
+
+    @property
+    def battery_strings_parallel(self) -> float:
+        """Parallel strings implied by pack capacity and cell capacity."""
+        if self.cell_capacity_ah <= 0:
+            return 1.0
+        return max(self.battery_capacity_ah / self.cell_capacity_ah, 1.0)
+
+    @property
+    def battery_resistance(self) -> float:
+        """
+        Pack internal resistance [Ω].
+
+        Series cells add resistance, parallel strings divide it. At the
+        currents a heavy VTOL pulls in hover this is not a rounding term:
+        the I²R heat comes out of the same pack that has to fly the
+        mission, and ignoring it makes endurance look better than it is.
+        """
+        if self.battery_internal_resistance_ohm is not None:
+            return float(self.battery_internal_resistance_ohm)
+        return (self.battery_cells_series * self.cell_internal_resistance_ohm
+                / self.battery_strings_parallel)
+
+    @property
+    def battery_usable_wh(self) -> float:
+        """Energy the aircraft can actually draw [Wh]."""
+        return self.battery_energy_wh * self.battery_usable_fraction
+
+    @property
+    def eta_vtol_effective(self) -> float:
+        return self.eta_vtol if self.eta_vtol is not None else self.eta_prop
+
+    @property
+    def eta_cruise_effective(self) -> float:
+        return self.eta_cruise if self.eta_cruise is not None else self.eta_prop
+
+    @property
+    def disk_loading(self) -> float:
+        """Rotor disk loading [N/m²] over the total lift-rotor area."""
+        return self.W / self.A_rotor if self.A_rotor > 0 else float('inf')
+
+    @property
+    def rotor_diameter(self) -> float:
+        """Diameter of one lift rotor implied by the total area [m]."""
+        if self.n_rotors <= 0 or self.A_rotor <= 0:
+            return 0.0
+        return 2.0 * np.sqrt(self.A_rotor / self.n_rotors / np.pi)
+
+    @property
+    def wing_chord(self) -> float:
+        """Mean aerodynamic chord implied by S_ref and AR [m]."""
+        return np.sqrt(self.S_ref / self.AR) if self.AR > 0 else 0.0
+
+    # ── Aerodynamics ──────────────────────────────────────────────────────
+
+    @property
+    def wing_geometry(self):
+        """Wing geometry implied by this vehicle, for the aero model."""
+        from .aero import WingGeometry
+        return WingGeometry(
+            S_ref=self.S_ref, AR=self.AR,
+            taper_ratio=self.taper_ratio,
+            twist_tip_deg=self.twist_tip_deg,
+            airfoil=self.airfoil,
+        )
+
+    @property
+    def aero_polar(self):
+        """Attached drag polar, or ``None`` if the vehicle has no aero model."""
+        return getattr(self, '_aero_polar', None)
+
+    def attach_polar(self, polar) -> "AircraftEnergyParams":
+        """
+        Use a computed drag polar instead of the constant-coefficient one.
+
+        Returns self, so it chains. The polar is held by reference and
+        deliberately not deep-copied by :meth:`with_payload`: it describes
+        the wing, which payload does not change, and copying a table per
+        payload variant would be waste.
+        """
+        self._aero_polar = polar
+        return self
+
+    def build_polar(self, **kwargs) -> "AircraftEnergyParams":
+        """Compute (or load from cache) this vehicle's polar and attach it."""
+        from .aero import get_polar
+        return self.attach_polar(get_polar(self.wing_geometry, **kwargs))
+
+    def reynolds_at(self, V: float, altitude: float) -> float:
+        """Chord Reynolds number at a flight condition."""
+        from .aero import reynolds
+        return reynolds(V, self.wing_chord, altitude)
+
+    def drag_coefficient(self, C_L: float, V: float = None,
+                         altitude: float = None) -> float:
+        """
+        Drag coefficient at a trimmed lift coefficient.
+
+        Uses the attached polar when there is one, and the analytic
+        parabolic form otherwise. Both branches take the same arguments,
+        so the caller never has to know which is in use — but
+        ``aero_source`` reports it, because a result built on assumed
+        constants should not be quoted as computed aerodynamics.
+        """
+        polar = self.aero_polar
+        if polar is None or V is None or altitude is None:
+            return self.C_D0 + self.k_drag * C_L ** 2
+        return polar.C_D(C_L, self.reynolds_at(V, altitude))
+
+    def C_L_max_at(self, V: float = None, altitude: float = None) -> float:
+        """Maximum lift coefficient, from the polar when one is attached."""
+        polar = self.aero_polar
+        if polar is None or V is None or altitude is None:
+            return self.C_L_max
+        return polar.C_L_max(self.reynolds_at(V, altitude))
+
+    @property
+    def aero_source(self) -> str:
+        polar = self.aero_polar
+        return polar.source if polar is not None else "constant-coefficient"
+
+    def with_payload(self, payload_kg: float) -> "AircraftEnergyParams":
+        """
+        A copy of this vehicle carrying ``payload_kg`` of payload.
+
+        Prefer this to mutating ``m_tow``: it states the intent, and it
+        leaves the original untouched so a sweep cannot accumulate mass
+        across iterations.
+        """
+        import copy as _copy
+        polar = self.aero_polar
+        if polar is not None:
+            self._aero_polar = None          # keep the table out of the copy
+        try:
+            out = _copy.deepcopy(self)
+        finally:
+            if polar is not None:
+                self._aero_polar = polar
+        out.m_tow = self.m_tow + payload_kg
+        if polar is not None:
+            out.attach_polar(polar)          # shared by reference
+        return out
+
+    def validate(self) -> list:
+        """
+        Report physically implausible parameter combinations.
+
+        Returns a list of human-readable warnings; empty means nothing
+        obviously wrong. These are sanity bounds, not hard limits — a
+        deliberate design may sit outside them, but it should do so
+        knowingly.
+        """
+        out = []
+
+        dl_kg = self.m_tow / self.A_rotor if self.A_rotor > 0 else float('inf')
+        if dl_kg > 25.0:
+            out.append(
+                f"Disk loading is {dl_kg:.0f} kg/m² over {self.A_rotor:.2f} m² of "
+                f"total rotor area — multirotors of this class run 5–15 kg/m². "
+                f"That implies {self.n_rotors} rotors of only "
+                f"{self.rotor_diameter*100:.0f} cm diameter. If A_rotor was "
+                f"meant per rotor, the total is "
+                f"{self.A_rotor*self.n_rotors:.2f} m² ({dl_kg/self.n_rotors:.0f} kg/m²). "
+                f"Hover power scales with sqrt(disk loading), so this drives "
+                f"every VTOL number in the mission."
+            )
+        elif dl_kg < 3.0:
+            out.append(f"Disk loading is only {dl_kg:.1f} kg/m² — unusually low.")
+
+        if not 0.2 <= self.eta_vtol_effective <= 0.85:
+            out.append(f"eta_vtol {self.eta_vtol_effective:.2f} is outside 0.20–0.85.")
+        if not 0.2 <= self.eta_cruise_effective <= 0.90:
+            out.append(f"eta_cruise {self.eta_cruise_effective:.2f} is outside 0.20–0.90.")
+
+        v_full = self.battery_cells_series * 4.2
+        if abs(v_full - self.battery_voltage * 4.2 / 3.7) > 1.0:
+            out.append(
+                f"battery_voltage {self.battery_voltage:.1f} V does not match "
+                f"{self.battery_cells_series}S ({self.battery_cells_series*3.7:.1f} V "
+                f"nominal)."
+            )
+
+        if self.C_L_max <= self.C_L:
+            out.append(
+                f"C_L_max ({self.C_L_max:.2f}) is not above the reference cruise "
+                f"C_L ({self.C_L:.2f}) — the aircraft cruises at or beyond stall."
+            )
+
+        return out
 
     # ── Aerodynamic helpers ───────────────────────────────────────────────
 

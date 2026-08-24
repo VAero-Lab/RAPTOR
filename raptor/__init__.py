@@ -18,7 +18,14 @@ Modules:
     builder        — Intelligent path builder (DEM-aware feasible paths)
     atmosphere     — ISA standard atmosphere model (density vs altitude)
     energy         — Power/energy models and battery SOC tracking (with stall detection)
-    airspace       — 3D regulatory zone management and geofencing (RDAC 101)
+    aero           — Drag polars from geometry (AeroSandbox surrogate)
+    dem_build      — Building DEMs from GeoTIFF tiles or OpenTopoData
+    regulations    — Codified UAS rules (RDAC 101) and permission classes
+    compliance     — Graded regulatory standing and waiver quantification
+    missions       — Mission profiles: round trip, tours, hub-and-spoke
+    airspace       — 3D regulatory zone management and geofencing
+    corridor       — Terrain-following reference profiles (AGL corridors)
+    penalties      — Constraint handling: regulations as search pressure
     scenarios      — Medical delivery flight scenario definitions
     optimizer      — Path optimization engine (DE-based)
     mission_planner— Multi-leg mission orchestration with SOC coupling
@@ -29,7 +36,7 @@ Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from .config import UAVConfig, MissionConstraints
-from .dem import DEMInterface
+from .dem import DEMInterface, find_dem
 from .segments import (
     SegmentType, FlightSegment,
     VTOLAscend, VTOLDescend,
@@ -49,10 +56,38 @@ from .energy import (
     power_fw_climb, power_fw_cruise, power_fw_descent,
     power_vertical_descent,
 )
+from .regulations import (
+    PermissionClass, RegulatoryProfile, OperationalContext,
+    RDAC_101, MEDICAL_DELIVERY_CONTEXT,
+)
+from .corridor import (
+    CorridorProfile, CorridorSurvey,
+    build_corridor_profile, survey_corridor, climb_limited_envelope,
+)
+from .penalties import PenaltyWeights, PenaltyBreakdown, evaluate_penalties
+from .aero import (
+    AeroPolar, WingGeometry, build_polar, get_polar, parabolic_polar,
+    reynolds, check_flight_envelope, aerosandbox_available,
+)
+from .dem_build import (
+    OpenTopoDataClient, build_dem_from_geotiff, build_dem_from_opentopodata,
+    corridor_bbox, route_mask, save_dem,
+)
+from .compliance import (
+    ComplianceLevel, ComplianceAssessment, HeightWaiver, Excursion,
+    assess_compliance, mission_compliance, find_excursions,
+)
+from .missions import (
+    MissionProfile, BatteryAction, Stop, MissionPlan,
+    one_way, out_and_back, sample_collection, supply_tour,
+    hub_and_spoke, shuttle,
+)
 from .airspace import (
     ZoneType, AirspaceZone, AirspaceManager,
+    PermissionClass as _PermissionClass,
     CircularZone, PolygonalZone,
     ZoneViolation, AirspaceReport,
+    DEFAULT_PERMISSION, DEFAULT_PERMIT_FAMILY,
     build_airspace,
     load_airspace_from_file,
 )
@@ -104,10 +139,10 @@ from .visualization_plotly import (
     plot_all as iplot_all,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 __all__ = [
     "UAVConfig", "MissionConstraints",
-    "DEMInterface",
+    "DEMInterface", "find_dem",
     "SegmentType", "FlightSegment",
     "VTOLAscend", "VTOLDescend",
     "FWClimb", "FWDescend", "FWCruise", "Transition",
@@ -119,7 +154,23 @@ __all__ = [
     "BatteryModel", "BatteryState",
     "SegmentEnergyResult", "MissionEnergyResult",
     "analyze_path_energy",
+    "PermissionClass", "RegulatoryProfile", "OperationalContext",
+    "RDAC_101", "MEDICAL_DELIVERY_CONTEXT",
+    "CorridorProfile", "CorridorSurvey", "build_corridor_profile",
+    "survey_corridor", "climb_limited_envelope",
+    "PenaltyWeights", "PenaltyBreakdown", "evaluate_penalties",
+    "AeroPolar", "WingGeometry", "build_polar", "get_polar",
+    "parabolic_polar", "reynolds", "check_flight_envelope",
+    "aerosandbox_available",
+    "OpenTopoDataClient", "build_dem_from_geotiff",
+    "build_dem_from_opentopodata", "corridor_bbox", "route_mask", "save_dem",
+    "ComplianceLevel", "ComplianceAssessment", "HeightWaiver", "Excursion",
+    "assess_compliance", "mission_compliance", "find_excursions",
+    "MissionProfile", "BatteryAction", "Stop", "MissionPlan",
+    "one_way", "out_and_back", "sample_collection", "supply_tour",
+    "hub_and_spoke", "shuttle",
     "ZoneType", "AirspaceZone", "AirspaceManager",
+    "DEFAULT_PERMISSION", "DEFAULT_PERMIT_FAMILY",
     "CircularZone", "PolygonalZone",
     "ZoneViolation", "AirspaceReport",
     "build_airspace",

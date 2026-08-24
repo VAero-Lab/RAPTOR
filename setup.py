@@ -33,8 +33,16 @@ setup(
         "numpy>=1.21",
         "scipy>=1.7",
         "matplotlib>=3.5",
+        "plotly>=5.0",
     ],
+    # Optional, each enabling one capability. Every one of them degrades
+    # to a documented fallback rather than an ImportError, so the core
+    # planner installs and runs with numpy and scipy alone — and nothing
+    # region-specific is ever a dependency.
     extras_require={
+        "aero": ["aerosandbox>=4.0"],      # computed drag polars
+        "terrain": ["tifffile>=2021.1"],   # DEMs from local GeoTIFF tiles
+        "all": ["aerosandbox>=4.0", "tifffile>=2021.1"],
         "dev": ["pytest>=7.0", "black>=22.0", "flake8>=5.0"],
     },
     classifiers=[

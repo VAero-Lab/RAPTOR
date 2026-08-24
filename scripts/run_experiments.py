@@ -34,11 +34,8 @@ from raptor.astar_baseline import AStarGridPlanner
 
 
 def find_dem():
-    """Look for DEM file in common locations."""
-    for p in ['data/dmq_dem.npz', 'dmq_dem.npz', '../data/dmq_dem.npz']:
-        if os.path.exists(p):
-            return p
-    raise FileNotFoundError("Cannot find dmq_dem.npz. Place it in data/ or current directory.")
+    from raptor.dem import find_dem as _find
+    return _find()
 
 
 def main():

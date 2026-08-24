@@ -149,11 +149,28 @@ class FlightPath:
         """
         Append a segment to the path and propagate states.
 
+        Only the appended segment is propagated: everything before it is
+        unchanged by an append, and re-walking the whole chain each time
+        makes building an n-segment path cost O(n²). That is invisible for
+        the seven-segment constant-altitude path but not for the twenty-odd
+        segments of a terrain-following one, rebuilt on every objective
+        evaluation.
+
         Returns self for method chaining.
         """
         self._segments.append(segment)
-        self._propagate()
+        self._propagate_from(len(self._segments) - 1)
         return self
+
+    def _propagate_from(self, index: int):
+        """Propagate states from ``index`` onward, leaving earlier ones be."""
+        if index <= 0:
+            self._propagate()
+            return
+        state = self._segments[index - 1].end_state
+        for seg in self._segments[index:]:
+            seg.start_state = state
+            state = seg.end_state
 
     def insert_segment(self, index: int, segment: FlightSegment) -> 'FlightPath':
         """Insert a segment at a specific position."""

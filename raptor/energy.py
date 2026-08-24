@@ -58,19 +58,21 @@ def power_vertical_ascent(ac: AircraftEnergyParams,
     for steady vertical climb approximation, which is conservative).
     """
     rho = isa_density(altitude)
-    W = ac.W
-    T = W  # Steady vertical ascent: T ≈ W (neglecting acceleration)
+    T = ac.W  # Steady vertical ascent: T ≈ W (neglecting acceleration)
 
-    # Climb power
+    # Climb power — the work done raising the weight
     P_c = T * V_y
 
-    # Induced power (momentum theory with correction)
-    v_h = np.sqrt(T / (2 * rho * ac.A_rotor))  # Hover induced velocity
-    # For climbing: v_i from momentum theory
-    # P_i = k_i * T * (V_y/2 + sqrt((V_y/2)² + v_h²))  ... simplified
-    # Using the exact form from Table 10:
-    P_i = (ac.k_i * T * V_y / 2) + \
-          (ac.k_i * T / 2) * np.sqrt(V_y**2 + 2 * T / (rho * ac.A_rotor))
+    # Induced power. Momentum theory in axial climb gives
+    #     v_i = -V_y/2 + sqrt((V_y/2)² + v_h²),      v_h² = T/(2ρA)
+    # The induced velocity *falls* as the rotor climbs into undisturbed
+    # air: the climb velocity already supplies part of the momentum flux.
+    # Writing +V_y/2 instead — which is the correct form for *descent* —
+    # overstates ascent induced power by 18 % at 3 m/s on this airframe,
+    # and take-off is where a VTOL spends its worst power.
+    v_h_sq = T / (2 * rho * ac.A_rotor)
+    v_i = -V_y / 2 + np.sqrt((V_y / 2)**2 + v_h_sq)
+    P_i = ac.k_i * T * v_i
 
     # Profile power (blade drag)
     P_o = rho * ac.A_rotor * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
@@ -83,10 +85,11 @@ def power_hover(ac: AircraftEnergyParams,
     """
     P2: Hover (stationary flight) — VTOL rotors.
 
-    P2 = P_i,ideal + P_o
-       = k_i · T² / √(2·ρ·A) + ρ·A·V_TIP³·(σ·C_d/8)
+    P2 = P_i + P_o
+       = k_i · T · √(T / (2·ρ·A)) + ρ·A·V_TIP³·(σ·C_d/8)
 
-    In hover, T = W exactly.
+    In hover, T = W exactly, and the induced velocity is
+    v_h = √(T / 2ρA).
     """
     rho = isa_density(altitude)
     T = ac.W
@@ -132,8 +135,11 @@ def power_transition(ac: AircraftEnergyParams,
     P_o = rho * ac.A_rotor * ac.V_tip**3 * \
           (ac.sigma_rotor * ac.C_d_blade / 8) * (1 + 4.6 * mu**2)
 
-    # Parasitic power (fuselage drag)
-    P_p = 0.5 * rho * V_inf**3 * ac.C_D * ac.S_ref
+    # Parasitic power. C_D0, not the full cruise drag polar: during
+    # transition the rotors still carry the weight, so the wing is barely
+    # loaded and its induced drag has not appeared yet. Using ac.C_D here
+    # charges the aircraft for lift it is not producing.
+    P_p = 0.5 * rho * V_inf**3 * ac.C_D0 * ac.S_ref
 
     return P_i + P_o + P_p
 
@@ -164,16 +170,16 @@ def power_fw_climb(ac: AircraftEnergyParams,
     C_L_climb = ac.W * np.cos(gamma) / (q * ac.S_ref) if q * ac.S_ref > 0 else ac.C_L
 
     # ── Stall check ──────────────────────────────────────────────
-    if C_L_climb > ac.C_L_max:
+    if C_L_climb > ac.C_L_max_at(V_inf, altitude):
         # Return a steep penalty: nominal power × (C_L / C_L_max)²
         # This creates a smooth gradient pushing the optimizer away from
         # the stall boundary rather than a hard discontinuity.
-        stall_ratio = C_L_climb / ac.C_L_max
+        stall_ratio = C_L_climb / ac.C_L_max_at(V_inf, altitude)
         # Estimate a nominal power and scale by stall ratio squared
         P_nominal = ac.W * V_inf  # rough upper bound
         return P_nominal * stall_ratio**2
 
-    C_D_climb = ac.C_D0 + ac.k_drag * C_L_climb**2
+    C_D_climb = ac.drag_coefficient(C_L_climb, V_inf, altitude)
     D = q * ac.S_ref * C_D_climb
 
     # Total power = drag power + climb power
@@ -203,12 +209,12 @@ def power_fw_cruise(ac: AircraftEnergyParams,
     C_L_cruise = ac.W / (q * ac.S_ref) if q * ac.S_ref > 0 else ac.C_L
 
     # ── Stall check ──────────────────────────────────────────────
-    if C_L_cruise > ac.C_L_max:
-        stall_ratio = C_L_cruise / ac.C_L_max
+    if C_L_cruise > ac.C_L_max_at(V_inf, altitude):
+        stall_ratio = C_L_cruise / ac.C_L_max_at(V_inf, altitude)
         P_nominal = ac.W * V_inf
         return P_nominal * stall_ratio**2
 
-    C_D_cruise = ac.C_D0 + ac.k_drag * C_L_cruise**2
+    C_D_cruise = ac.drag_coefficient(C_L_cruise, V_inf, altitude)
     D = q * ac.S_ref * C_D_cruise
 
     return D * V_inf
@@ -237,12 +243,12 @@ def power_fw_descent(ac: AircraftEnergyParams,
     C_L_desc = ac.W * np.cos(gamma) / (q * ac.S_ref) if q * ac.S_ref > 0 else ac.C_L
 
     # ── Stall check ──────────────────────────────────────────────
-    if C_L_desc > ac.C_L_max:
-        stall_ratio = C_L_desc / ac.C_L_max
+    if C_L_desc > ac.C_L_max_at(V_inf, altitude):
+        stall_ratio = C_L_desc / ac.C_L_max_at(V_inf, altitude)
         P_nominal = ac.W * V_inf
         return P_nominal * stall_ratio**2
 
-    C_D_desc = ac.C_D0 + ac.k_drag * C_L_desc**2
+    C_D_desc = ac.drag_coefficient(C_L_desc, V_inf, altitude)
     D = q * ac.S_ref * C_D_desc
 
     P_p = V_inf * D
@@ -259,25 +265,31 @@ def power_vertical_descent(ac: AircraftEnergyParams,
     """
     P7: Vertical descent (landing) — VTOL rotors.
 
-    Same form as P1 but with descent velocity.
-    In vertical descent the rotor operates in vortex-ring / windmill
-    state; we use the same momentum-theory model with |V_y| as a
-    conservative estimate.
+    Momentum theory with the descent sign, which is valid while the
+    descent rate stays well below the hover induced velocity.
+
+    Between roughly 0.25·v_h and 1.5·v_h the rotor enters the vortex-ring
+    state, where momentum theory does not merely lose accuracy but breaks
+    down — real power *increases* there, and the model below would
+    under-predict it. ``vortex_ring_margin`` reports how close a given
+    descent rate is to that band, so a planner can keep out of it.
     """
     rho = isa_density(altitude)
     T = ac.W  # Controlled descent: T ≈ W
 
     V_y_abs = abs(V_y)
 
-    # Induced power in descent (using climb formula with |V_y|)
-    P_i = (ac.k_i * T * V_y_abs / 2) + \
-          (ac.k_i * T / 2) * np.sqrt(V_y_abs**2 + 2 * T / (rho * ac.A_rotor))
+    # Same momentum-theory expression as the climb, with the sign the
+    # other way round: descending, the rotor re-ingests its own wake and
+    # the induced velocity *rises*.
+    v_h_sq = T / (2 * rho * ac.A_rotor)
+    v_i = V_y_abs / 2 + np.sqrt((V_y_abs / 2)**2 + v_h_sq)
+    P_i = ac.k_i * T * v_i
 
     # Profile power
     P_o = rho * ac.A_rotor * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
 
-    # Climb power is negative (gravity assists), but rotor still works
-    # In controlled descent, net power = P_i + P_o - T*V_y
+    # Gravity does part of the work, so the rotor supplies less.
     P_net = P_i + P_o - T * V_y_abs
 
     return max(P_net, P_o)  # At least profile drag power
@@ -361,6 +373,9 @@ class BatteryState:
     mah_consumed: float   # Cumulative mAh consumed
     mah_remaining: float  # Remaining capacity [mAh]
     percent_remaining: float  # Battery % remaining
+    c_rate: float = 0.0        # Instantaneous discharge rate [C]
+    ohmic_loss_w: float = 0.0  # I²R heat at this instant [W]
+    power_limited: bool = False  # Pack could not supply the demanded power
 
 
 @dataclass
@@ -392,6 +407,34 @@ class MissionEnergyResult:
     feasible: bool          # True if SOC never goes below threshold
     min_SOC: float
     battery_timeline: List[BatteryState]
+
+    # ── Pack diagnostics ──────────────────────────────────────────────
+    #: Energy drawn from the cells, which exceeds the energy delivered to
+    #: the drivetrain by the I²R heat.
+    energy_from_cells_wh: float = 0.0
+    ohmic_loss_wh: float = 0.0
+    #: Highest discharge rate seen [C], and whether it breached the
+    #: vehicle's continuous rating.
+    max_c_rate: float = 0.0
+    c_rate_exceeded: bool = False
+    #: True if the pack could not supply the demanded power at some point,
+    #: which is a different failure from running out of energy.
+    power_limited: bool = False
+
+    def pack_summary(self) -> str:
+        """Battery-side view of the mission."""
+        lines = [
+            f"Delivered to drivetrain: {self.total_energy_wh:7.1f} Wh",
+            f"Drawn from cells:        {self.energy_from_cells_wh:7.1f} Wh",
+            f"Ohmic loss (I²R):        {self.ohmic_loss_wh:7.1f} Wh"
+            f"  ({100*self.ohmic_loss_wh/max(self.energy_from_cells_wh,1e-9):.1f} %)",
+            f"Peak discharge rate:     {self.max_c_rate:7.1f} C"
+            + ("   EXCEEDS continuous rating" if self.c_rate_exceeded else ""),
+            f"SOC at arrival:          {self.SOC_final*100:7.1f} %",
+        ]
+        if self.power_limited:
+            lines.append("  ! pack could not meet the demanded power at some point")
+        return "\n".join(lines)
 
     @property
     def power_profile(self) -> np.ndarray:
@@ -447,10 +490,20 @@ class BatteryModel:
         self.V_nom = ac.battery_voltage
         self.capacity_mah = ac.battery_capacity_mah
 
+        # Usable energy, not nameplate: pack overhead, cell mismatch and
+        # the unreachable tail below the cut-off voltage all sit between
+        # the cell datasheet and what the aircraft can actually draw.
+        self.E_usable_wh = ac.battery_usable_wh
+
         # Tracking
-        self.energy_consumed_wh = 0.0
+        self.energy_consumed_wh = 0.0      # delivered to the drivetrain
+        self.energy_from_cells_wh = 0.0    # drawn from the chemistry
+        self.ohmic_loss_wh = 0.0
         self.mah_consumed = 0.0
         self.time_elapsed = 0.0
+        self.max_c_rate = 0.0
+        self.power_limited = False
+        self._v_terminal = self.ocv
         self.timeline: List[BatteryState] = []
 
         # Record initial state
@@ -461,20 +514,57 @@ class BatteryModel:
         self.SOC = SOC_initial
         self.SOC_initial = SOC_initial
         self.energy_consumed_wh = 0.0
+        self.energy_from_cells_wh = 0.0
+        self.ohmic_loss_wh = 0.0
         self.mah_consumed = 0.0
         self.time_elapsed = 0.0
+        self.max_c_rate = 0.0
+        self.power_limited = False
+        self._v_terminal = self.ocv
         self.timeline.clear()
         self._record_state(0.0, 0.0)
 
+    #: Per-cell open-circuit voltage against state of charge for a LiPo.
+    #: Tabulated rather than fitted so it can be replaced wholesale for a
+    #: different chemistry — Li-ion NMC and LiFePO4 have quite different
+    #: shapes, and the plateau is what decides how much of the pack is
+    #: actually reachable above the cut-off.
+    OCV_SOC = np.array([0.00, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 0.95, 1.00])
+    OCV_CELL_V = np.array([3.30, 3.45, 3.55, 3.65, 3.75, 3.85, 4.00, 4.15, 4.20])
+
+    @property
+    def ocv(self) -> float:
+        """
+        Open-circuit pack voltage at the present SOC [V].
+
+        The previous model was ``V_nom × (0.85 + 0.15·SOC)``, which tops
+        out at the *nominal* 22.2 V for a 6S pack that actually leaves
+        the ground at 25.2 V and is empty near 19.8 V. Currents inferred
+        from it were therefore high at full charge and low when empty —
+        exactly backwards.
+        """
+        cell = float(np.interp(self.SOC, self.OCV_SOC, self.OCV_CELL_V))
+        return cell * self.ac.battery_cells_series
+
     @property
     def voltage(self) -> float:
-        """
-        Approximate terminal voltage as a function of SOC.
+        """Terminal voltage at the last recorded load [V]."""
+        return self._v_terminal
 
-        Simple linear model: V = V_nom × (0.85 + 0.15 × SOC)
-        This captures the voltage sag at low SOC.
+    @property
+    def max_power_w(self) -> float:
         """
-        return self.V_nom * (0.85 + 0.15 * self.SOC)
+        Greatest power the pack can deliver at this SOC [W].
+
+        A source with internal resistance R and open-circuit voltage V
+        cannot exceed V²/4R however hard it is loaded — beyond that the
+        demand is simply unmeetable, which is a different failure from
+        running out of energy and worth reporting as such.
+        """
+        R = self.ac.battery_resistance
+        if R <= 0:
+            return float('inf')
+        return self.ocv ** 2 / (4.0 * R)
 
     @property
     def mah_remaining(self) -> float:
@@ -486,62 +576,112 @@ class BatteryModel:
 
     def discharge(self, power_w: float, duration_s: float) -> Dict:
         """
-        Discharge the battery at constant power for a duration.
+        Draw constant power from the pack for a duration.
+
+        The current is solved from the load rather than assumed, because
+        the pack has resistance: delivering ``power_w`` at the terminals
+        means the chemistry gives up ``I·V_oc``, of which ``I²R`` becomes
+        heat and never reaches the propulsion system. At the currents a
+        heavy lift+cruise VTOL pulls in hover that gap is percent-level,
+        and it compounds over a mission.
+
+        Solving ``I·V_oc − I²R = P`` for the smaller root:
+
+            I = (V_oc − √(V_oc² − 4RP)) / 2R
+
+        A negative discriminant means the pack simply cannot supply the
+        demand at this state of charge; the draw is capped and flagged
+        rather than silently producing an imaginary current.
 
         Parameters
         ----------
         power_w : float
-            Electrical power draw [W].
+            Electrical power required at the pack terminals [W].
         duration_s : float
             Duration of discharge [s].
 
         Returns
         -------
-        dict with energy_wh, mah_consumed, SOC_end, current_A
+        dict with energy_wh, mah_consumed, SOC_end, current_A and the
+        loss and limit diagnostics.
         """
-        # Energy consumed
-        energy_j = power_w * duration_s
-        energy_wh = energy_j / 3600.0
-
-        # Current draw (using average voltage during segment)
-        V_avg = self.voltage
-        current_A = power_w / V_avg if V_avg > 0 else 0
-
-        # mAh consumed: I [A] × t [h] × 1000
-        mah = current_A * (duration_s / 3600.0) * 1000.0
-
-        # Update SOC: ΔSOC = -E_consumed / E_max
-        delta_SOC = energy_wh / self.E_max_wh if self.E_max_wh > 0 else 0
         SOC_start = self.SOC
+        dt_h = duration_s / 3600.0
+        V_oc = self.ocv
+        R = self.ac.battery_resistance
+        power_w = max(float(power_w), 0.0)
+
+        limited = False
+        if R > 0:
+            disc = V_oc ** 2 - 4.0 * R * power_w
+            if disc <= 0.0:
+                # Beyond the matched-load maximum: cap at V_oc/2R.
+                limited = True
+                current_A = V_oc / (2.0 * R)
+            else:
+                current_A = (V_oc - np.sqrt(disc)) / (2.0 * R)
+        else:
+            current_A = power_w / V_oc if V_oc > 0 else 0.0
+
+        V_term = V_oc - current_A * R
+        ohmic_w = current_A ** 2 * R
+        delivered_w = current_A * V_term
+
+        # Energy leaving the cells, which is what depletes the pack.
+        energy_cells_wh = current_A * V_oc * dt_h
+        energy_wh = delivered_w * dt_h            # reaching the drivetrain
+        energy_j = energy_wh * 3600.0
+        mah = current_A * dt_h * 1000.0
+
+        delta_SOC = (energy_cells_wh / self.E_usable_wh
+                     if self.E_usable_wh > 0 else 0.0)
 
         self.SOC = max(0.0, self.SOC - delta_SOC)
         self.energy_consumed_wh += energy_wh
+        self.energy_from_cells_wh += energy_cells_wh
+        self.ohmic_loss_wh += ohmic_w * dt_h
         self.mah_consumed += mah
         self.time_elapsed += duration_s
+        self._v_terminal = V_term
+        self.power_limited = self.power_limited or limited
 
-        self._record_state(power_w, current_A)
+        c_rate = (current_A / self.ac.battery_capacity_ah
+                  if self.ac.battery_capacity_ah > 0 else 0.0)
+        self.max_c_rate = max(self.max_c_rate, c_rate)
+
+        self._record_state(power_w, current_A, c_rate, ohmic_w, limited)
 
         return {
             'energy_wh': energy_wh,
             'energy_j': energy_j,
+            'energy_from_cells_wh': energy_cells_wh,
+            'ohmic_loss_wh': ohmic_w * dt_h,
             'mah_consumed': mah,
             'SOC_start': SOC_start,
             'SOC_end': self.SOC,
             'current_A': current_A,
+            'voltage_V': V_term,
+            'c_rate': c_rate,
+            'power_limited': limited,
         }
 
-    def _record_state(self, power_w: float, current_A: float):
+    def _record_state(self, power_w: float, current_A: float,
+                      c_rate: float = 0.0, ohmic_w: float = 0.0,
+                      limited: bool = False):
         """Record current battery state to timeline."""
         self.timeline.append(BatteryState(
             time=self.time_elapsed,
             SOC=self.SOC,
-            voltage=self.voltage,
+            voltage=self._v_terminal,
             current_draw=current_A,
             power_elec=power_w,
             energy_consumed_wh=self.energy_consumed_wh,
             mah_consumed=self.mah_consumed,
             mah_remaining=self.mah_remaining,
             percent_remaining=self.percent_remaining,
+            c_rate=c_rate,
+            ohmic_loss_w=ohmic_w,
+            power_limited=limited,
         ))
 
     @property
@@ -598,10 +738,18 @@ def analyze_path_energy(path, ac: AircraftEnergyParams,
         }
 
         # Compute mechanical power
-        P_mec = compute_segment_power(ac, seg.segment_type.value, kin_dict)
+        seg_name = seg.segment_type.value
+        P_mec = compute_segment_power(ac, seg_name, kin_dict)
 
-        # Electrical power (accounting for propulsion efficiency)
-        P_elec = P_mec / ac.eta_prop
+        # Electrical power. Lift rotors and the cruise propulsor are
+        # different machines with different efficiencies; charging hover
+        # at the cruise figure (or the reverse) skews whichever phase
+        # dominates the mission, and for short medical hops the VTOL
+        # phases dominate.
+        eta = (ac.eta_vtol_effective
+               if seg_name in ("VTOL_ASCEND", "VTOL_DESCEND", "TRANSITION")
+               else ac.eta_cruise_effective)
+        P_elec = P_mec / eta
 
         # Discharge battery for this segment's duration
         discharge = battery.discharge(P_elec, k.duration)
@@ -636,4 +784,9 @@ def analyze_path_energy(path, ac: AircraftEnergyParams,
         feasible=battery.is_feasible,
         min_SOC=min(s.SOC for s in battery.timeline),
         battery_timeline=battery.timeline,
+        energy_from_cells_wh=battery.energy_from_cells_wh,
+        ohmic_loss_wh=battery.ohmic_loss_wh,
+        max_c_rate=battery.max_c_rate,
+        c_rate_exceeded=battery.max_c_rate > ac.battery_max_c_rate,
+        power_limited=battery.power_limited,
     )

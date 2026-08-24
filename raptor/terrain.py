@@ -8,7 +8,7 @@ suitable for optimization (continuous, differentiable-ish penalties).
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 import numpy as np
 
@@ -55,6 +55,32 @@ class TerrainReport:
     terrain_profile: np.ndarray
     clearance_margin: float
     constraint_penalty: float
+
+    # ── Vertical corridor (floor *and* ceiling) ───────────────────────
+    max_agl: float = np.nan
+    #: Waypoints above the regulatory AGL ceiling (RDAC 101.185).
+    n_ceiling_violations: int = 0
+    ceiling_violation_fraction: float = 0.0
+    #: Worst exceedance of the ceiling [m].
+    max_ceiling_excess: float = 0.0
+    ceiling_feasible: bool = True
+    #: Required clearance applied at each waypoint [m AGL]; 0 in the
+    #: take-off/landing funnels.
+    required_clearance: np.ndarray = field(default_factory=lambda: np.array([]))
+    #: Waypoints exempted from the clearance floor (terminal funnels).
+    n_exempt: int = 0
+    #: Lowest AGL among waypoints that actually violate the floor [m].
+    #: ``min_agl`` is normally 0 at the pads and says nothing about
+    #: whether anything is wrong; this is the number to quote.
+    min_violating_agl: float = float('nan')
+    #: Smooth measure of how far the path lies outside the corridor,
+    #: in metre-fraction units: mean(|excursion|)/corridor_width.
+    corridor_penalty: float = 0.0
+
+    @property
+    def corridor_feasible(self) -> bool:
+        """True when the path stays inside the vertical corridor."""
+        return self.is_feasible and self.ceiling_feasible
 
 
 class TerrainAnalyzer:
@@ -122,12 +148,31 @@ class TerrainAnalyzer:
             seg_type = seg.segment_type.value
             required_clearance[i] = self.constraints.terrain_clearance_for_segment(seg_type)
 
-        # Find violations (excluding NaN terrain)
+        # Take-off and landing funnels: the aircraft *must* reach AGL 0 at
+        # its pads, so demanding clearance there marks every path — however
+        # well routed — as infeasible at its own endpoints. Exempt waypoints
+        # within terminal_exempt_radius_m of either terminus.
+        exempt = self._terminal_mask(path, lats, lons)
+        required_clearance = np.where(exempt, 0.0, required_clearance)
+
+        # Find violations (excluding NaN terrain). The tolerance keeps
+        # accumulated floating-point error in the position propagation from
+        # deciding feasibility; it is orders of magnitude below DEM error.
+        tol = getattr(self.constraints, 'clearance_tolerance_m', 0.0)
         valid_mask = ~np.isnan(terrain_elevs)
-        violations = valid_mask & (agl < required_clearance)
+        violations = valid_mask & (agl < required_clearance - tol)
         n_valid = valid_mask.sum()
         n_violations = violations.sum()
         violation_frac = n_violations / n_valid if n_valid > 0 else 0.0
+
+        # Regulatory ceiling (RDAC 101.185). Climb-out and approach are
+        # exempt for the same reason as the floor: the funnels are where
+        # the aircraft legitimately transits the whole band.
+        max_agl = float(self.constraints.max_agl)
+        ceiling_excess = np.where(valid_mask & ~exempt, agl - max_agl - tol, 0.0)
+        ceiling_excess = np.maximum(ceiling_excess, 0.0)
+        n_ceiling = int(np.sum(ceiling_excess > 0))
+        ceiling_frac = n_ceiling / n_valid if n_valid > 0 else 0.0
 
         # Min AGL (over valid terrain)
         agl_valid = agl.copy()
@@ -145,10 +190,20 @@ class TerrainAnalyzer:
 
         # Smooth penalty for optimization
         # penalty = sum of squared violations (0 when feasible)
-        deficit = required_clearance - agl  # positive = violation
+        deficit = required_clearance - agl - tol  # positive = violation
         deficit[~valid_mask] = 0.0
         deficit = np.maximum(deficit, 0.0)
         constraint_penalty = float(np.sum(deficit ** 2))
+
+        # Corridor penalty: one scale-free number the optimizer can weight
+        # without retuning per region. Excursions below the floor and above
+        # the ceiling are measured in units of the corridor's own height,
+        # then averaged over the path — so it grows with both how far and
+        # how often the path leaves the band.
+        width = max(self.constraints.corridor_width("FW_CRUISE"), 1.0)
+        excursion = deficit + ceiling_excess
+        corridor_penalty = float(np.mean(excursion[valid_mask]) / width) \
+            if n_valid > 0 else 0.0
 
         # Fill terrain info back into waypoints
         for i, wp in enumerate(waypoints):
@@ -166,7 +221,38 @@ class TerrainAnalyzer:
             terrain_profile=terrain_elevs,
             clearance_margin=clearance_margin,
             constraint_penalty=constraint_penalty,
+            max_agl=max_agl,
+            n_ceiling_violations=n_ceiling,
+            ceiling_violation_fraction=ceiling_frac,
+            max_ceiling_excess=float(np.max(ceiling_excess)) if len(ceiling_excess) else 0.0,
+            ceiling_feasible=(n_ceiling == 0),
+            required_clearance=required_clearance,
+            n_exempt=int(np.sum(exempt)),
+            min_violating_agl=(float(np.min(agl[violations]))
+                               if n_violations > 0 else float('nan')),
+            corridor_penalty=corridor_penalty,
         )
+
+    def _terminal_mask(self, path: FlightPath,
+                       lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+        """
+        Waypoints inside the take-off or landing funnel.
+
+        A funnel is a horizontal cylinder of radius
+        ``constraints.terminal_exempt_radius_m`` around each terminus.
+        Inside it, neither the clearance floor nor the regulatory ceiling
+        is enforced: the aircraft is climbing out of, or descending onto,
+        a pad, and must legitimately pass through every height in the band.
+        """
+        r = getattr(self.constraints, 'terminal_exempt_radius_m', 0.0)
+        if r <= 0:
+            return np.zeros(len(lats), dtype=bool)
+
+        mask = np.zeros(len(lats), dtype=bool)
+        for term in (path.origin, path.destination):
+            d = _haversine_m(term[0], term[1], lats, lons)
+            mask |= (d <= r)
+        return mask
 
     def clearance_at_point(self, lat: float, lon: float,
                            alt: float) -> float:
@@ -261,3 +347,15 @@ class TerrainAnalyzer:
         # Restore original
         path.parameter_vector = theta
         return grad
+
+
+def _haversine_m(lat0: float, lon0: float,
+                 lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """Vectorised great-circle distance from one point to many [m]."""
+    R = 6_371_000.0
+    phi0 = np.radians(lat0)
+    phi = np.radians(lats)
+    dphi = phi - phi0
+    dlam = np.radians(lons - lon0)
+    a = np.sin(dphi / 2) ** 2 + np.cos(phi0) * np.cos(phi) * np.sin(dlam / 2) ** 2
+    return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
