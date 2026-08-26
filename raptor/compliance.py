@@ -115,6 +115,64 @@ class HeightWaiver:
     def n_excursions(self) -> int:
         return len(self.excursions)
 
+    def per_stretch(self, granularity_m: float = 5.0) -> List[dict]:
+        """
+        A separate height request for each excursion.
+
+        A single blanket ceiling over the whole route is the easy thing to
+        ask for and the hard thing to be granted: it requests relief
+        everywhere, including the 90 % of the track that never needed any.
+        RDAC 101.710 asks for lines of flight and the heights approved,
+        which admits a different ceiling per stretch — cheaper to justify,
+        and a smaller intrusion for whoever has to approve it.
+
+        Parameters
+        ----------
+        granularity_m : float
+            Round each requested height up to this multiple. Asking for
+            "137.4 m" invites an argument about precision the DEM cannot
+            support; asking for 140 m does not.
+
+        Returns
+        -------
+        List of dicts, one per stretch, ordered along the route.
+        """
+        out = []
+        for i, e in enumerate(self.excursions, 1):
+            requested = float(np.ceil(e.max_agl_m / granularity_m)
+                              * granularity_m)
+            out.append({
+                "index": i,
+                "start_km": e.start_distance_m / 1000.0,
+                "end_km": e.end_distance_m / 1000.0,
+                "length_m": e.length_m,
+                "requested_agl_m": requested,
+                "excess_m": requested - self.limit_agl_m,
+                "lat": e.lat, "lon": e.lon,
+            })
+        return out
+
+    @property
+    def blanket_excess_m(self) -> float:
+        """Relief a single route-wide ceiling would have to grant [m]."""
+        return self.max_excess_m
+
+    def relief_saved_by_stretching(self, granularity_m: float = 5.0) -> float:
+        """
+        Metre-kilometres of relief saved by asking per stretch.
+
+        The natural unit for "how much airspace am I asking for": height
+        above the limit, integrated along the route. A blanket request
+        buys the worst excess over the whole length; per-stretch requests
+        buy only what each stretch needs.
+        """
+        blanket = self.max_excess_m * self.route_length_m / 1000.0
+        stretched = sum(
+            s["excess_m"] * s["length_m"] / 1000.0
+            for s in self.per_stretch(granularity_m)
+        )
+        return float(blanket - stretched)
+
     def summary(self) -> str:
         lines = [
             f"Height waiver required (RDAC 101.185 → 101.035)",
@@ -126,11 +184,18 @@ class HeightWaiver:
             f"({self.affected_fraction*100:.1f} %), "
             f"in {self.n_excursions} stretch(es)",
         ]
-        for i, e in enumerate(self.excursions, 1):
+        for s in self.per_stretch():
             lines.append(
-                f"    {i}. km {e.start_distance_m/1000:5.2f}–"
-                f"{e.end_distance_m/1000:5.2f}  peak {e.max_agl_m:.0f} m AGL "
-                f"at {e.lat:.4f}, {e.lon:.4f}"
+                f"    {s['index']}. km {s['start_km']:5.2f}–{s['end_km']:5.2f}"
+                f"  request {s['requested_agl_m']:.0f} m AGL "
+                f"(+{s['excess_m']:.0f})  at {s['lat']:.4f}, {s['lon']:.4f}"
+            )
+        saved = self.relief_saved_by_stretching()
+        if saved > 0 and self.n_excursions > 1:
+            lines.append(
+                f"  Asking per stretch rather than one ceiling over the whole "
+                f"route saves {saved:.1f} m·km of requested relief "
+                f"({100*saved/max(self.max_excess_m*self.route_length_m/1000, 1e-9):.0f} %)."
             )
         return "\n".join(lines)
 
@@ -140,15 +205,43 @@ class ComplianceAssessment:
     """The regulatory standing of one route, and how to act on it."""
     level: ComplianceLevel
     permits_required: Dict[str, str] = field(default_factory=dict)
+    #: Permits the *endpoints* sit inside, which no routing can avoid.
+    #: A medical delivery network is built around hospitals, and hospitals
+    #: are permit zones under RDAC 101.190(a)(3) — so the pads themselves
+    #: usually require an authorisation, and no amount of lateral
+    #: optimization will remove it. Separating these out is what stops a
+    #: permit-avoidance study chasing a trade that does not exist.
+    unavoidable_permits: Dict[str, str] = field(default_factory=dict)
     height_waiver: Optional[HeightWaiver] = None
     blocking_zones: List[str] = field(default_factory=list)
     clearance_violations: int = 0
     min_agl_m: float = float('nan')
     notes: List[str] = field(default_factory=list)
+    #: Rules the profile carries that this package cannot test, because
+    #: testing them needs data it does not have. Carried on the
+    #: assessment so a verdict states its own scope: "compliant" here
+    #: means compliant with the rules RAPTOR can see, and a reader is
+    #: entitled to know which those are.
+    unchecked_rules: List[str] = field(default_factory=list)
+
+    @property
+    def safe(self) -> bool:
+        """
+        True if the route clears the terrain.
+
+        Deliberately separate from :attr:`level`. Terrain clearance is a
+        safety constraint, not a regulatory one — no filing covers flying
+        into a hill — so it has no place in a taxonomy that maps onto
+        RDAC articles. But it must never be silently absent from a verdict
+        either: a route reported as "AUTHORISED" while a waypoint sits
+        below the ground is worse than one reported as illegal.
+        """
+        return self.clearance_violations == 0
 
     @property
     def flyable(self) -> bool:
-        return self.level.flyable
+        """Legal *and* safe. Both, or the route cannot be flown."""
+        return self.level.flyable and self.safe
 
     @property
     def needs_filing(self) -> bool:
@@ -156,10 +249,20 @@ class ComplianceAssessment:
 
     def verdict(self) -> str:
         """One line, for tables."""
+        if not self.safe:
+            # Stated first because it outranks everything below it: no
+            # amount of paperwork makes this route flyable.
+            return (f"UNSAFE — {self.clearance_violations} waypoint(s) below "
+                    f"the clearance floor (lowest "
+                    f"{self.min_agl_m:.0f} m AGL)")
         if self.level is ComplianceLevel.NON_COMPLIANT:
             return f"NOT FLYABLE — prohibited airspace ({len(self.blocking_zones)})"
         if self.level is ComplianceLevel.WAIVER_REQUIRED:
             w = self.height_waiver
+            if w is None:
+                # Level and detail disagree. Say so rather than crashing:
+                # a summary line is the last place that should raise.
+                return "WAIVER REQUIRED — extent not quantified"
             return (f"WAIVER — +{w.max_excess_m:.0f} m AGL over "
                     f"{w.affected_fraction*100:.0f}% of route")
         if self.level is ComplianceLevel.AUTHORIZATION_REQUIRED:
@@ -169,6 +272,9 @@ class ComplianceAssessment:
     def filing_summary(self) -> str:
         """What would actually have to be submitted, and to whom."""
         lines = [f"Compliance: {self.level.value.replace('_', ' ').upper()}"]
+        if not self.safe:
+            lines.insert(0, "SAFETY: route does not clear the terrain — "
+                            "not flyable regardless of the standing below.")
 
         if self.level is ComplianceLevel.NON_COMPLIANT:
             lines += [
@@ -183,7 +289,22 @@ class ComplianceAssessment:
             lines.append(f"  Authorisations (RDAC 101.190(a)) — "
                          f"{len(self.permits_required)}:")
             for zid, fam in sorted(self.permits_required.items()):
-                lines.append(f"    - {zid}  [{fam}]")
+                fixed = ("  (unavoidable — a terminal is inside this zone)"
+                         if zid in self.unavoidable_permits else "")
+                lines.append(f"    - {zid}  [{fam}]{fixed}")
+            if self.unavoidable_permits:
+                lines.append(
+                    f"  {len(self.unavoidable_permits)} of these cannot be "
+                    f"routed around: a medical network is built around "
+                    f"hospitals, and hospitals are permit zones under "
+                    f"RDAC 101.190(a)(3)."
+                )
+
+        if (self.level is ComplianceLevel.WAIVER_REQUIRED
+                and self.height_waiver is None):
+            lines.append("  Height relief is required but its extent was not "
+                         "computed — re-run the assessment with a terrain "
+                         "report to quantify it.")
 
         if self.height_waiver is not None:
             lines.append("  " + self.height_waiver.summary().replace("\n", "\n  "))
@@ -205,6 +326,14 @@ class ComplianceAssessment:
 
         if len(lines) == 1:
             lines.append("  Nothing to file.")
+
+        if self.unchecked_rules:
+            lines.append("")
+            lines.append("  Rules in force that this assessment did NOT test:")
+            for r in self.unchecked_rules:
+                lines.append(f"    · {r}")
+            lines.append("  A clean verdict above covers the rules RAPTOR "
+                         "can see, and not these.")
         return "\n".join(lines)
 
 
@@ -259,6 +388,7 @@ def assess_compliance(
     regulation: RegulatoryProfile = RDAC_101,
     context: OperationalContext = None,
     constraints=None,
+    airspace=None,
 ) -> ComplianceAssessment:
     """
     Grade a route against the regulation and say what it would take to fly it.
@@ -276,11 +406,27 @@ def assess_compliance(
         Zones already authorised are not counted again.
     constraints : MissionConstraints, optional
         Supplies the AGL limit; falls back to the regulatory profile.
+    airspace : AirspaceManager, optional
+        Needed to work out which permits the endpoints themselves sit
+        inside and therefore cannot be routed around.
 
     Returns
     -------
     ComplianceAssessment
     """
+    # The signature reads naturally in the wrong order: the fourth
+    # positional is the *regulation*, not the constraints, and both are
+    # things a caller has to hand. Passing constraints there produces a
+    # missing-attribute error somewhere further in, from a line that has
+    # nothing to do with the mistake.
+    if not hasattr(regulation, "max_agl_m"):
+        raise TypeError(
+            f"assess_compliance() got {type(regulation).__name__} as its "
+            f"'regulation' argument, which expects a RegulatoryProfile. "
+            f"MissionConstraints goes in 'constraints' — pass it by "
+            f"keyword: assess_compliance(..., constraints=con)."
+        )
+
     limit = (constraints.max_agl if constraints is not None
              else regulation.max_agl_m)
     authorized = set(context.authorized_zone_ids) if context else set()
@@ -320,6 +466,20 @@ def assess_compliance(
         blocking = [z for z in airspace_report.prohibited_zones
                     if z not in authorized]
 
+    # Which of those the terminals themselves sit inside. No route from a
+    # pad inside a zone can leave that zone, so these are a fixed cost of
+    # operating from that facility rather than a routing decision.
+    unavoidable: Dict[str, str] = {}
+    if permits and airspace is not None:
+        endpoints = ((path.origin[0], path.origin[1]),
+                     (path.destination[0], path.destination[1]))
+        for zid, fam in permits.items():
+            zone = airspace.get_zone(zid)
+            if zone is None or zone.is_global or zone.geometry is None:
+                continue
+            if any(zone.horizontal_contains(la, lo) for la, lo in endpoints):
+                unavoidable[zid] = fam
+
     if blocking:
         level = ComplianceLevel.NON_COMPLIANT
     elif waiver is not None:
@@ -336,6 +496,7 @@ def assess_compliance(
     return ComplianceAssessment(
         level=level,
         permits_required=permits,
+        unavoidable_permits=unavoidable,
         height_waiver=waiver,
         blocking_zones=blocking,
         clearance_violations=int(terrain_report.n_violations),
@@ -345,6 +506,7 @@ def assess_compliance(
         min_agl_m=float(getattr(terrain_report, 'min_violating_agl',
                                 terrain_report.min_agl)),
         notes=notes,
+        unchecked_rules=list(regulation.unenforceable_rules()),
     )
 
 
@@ -361,10 +523,12 @@ def mission_compliance(assessments: List[ComplianceAssessment]
 
     level = max((a.level for a in assessments), key=lambda x: x.rank)
     permits: Dict[str, str] = {}
+    unavoidable: Dict[str, str] = {}
     blocking: List[str] = []
     notes: List[str] = []
     for a in assessments:
         permits.update(a.permits_required)
+        unavoidable.update(a.unavoidable_permits)
         blocking.extend(z for z in a.blocking_zones if z not in blocking)
         notes.extend(n for n in a.notes if n not in notes)
 
@@ -384,9 +548,12 @@ def mission_compliance(assessments: List[ComplianceAssessment]
     return ComplianceAssessment(
         level=level,
         permits_required=permits,
+        unavoidable_permits=unavoidable,
         height_waiver=waiver,
         blocking_zones=blocking,
         clearance_violations=sum(a.clearance_violations for a in assessments),
         min_agl_m=min((a.min_agl_m for a in assessments), default=float('nan')),
         notes=notes,
+        unchecked_rules=(assessments[0].unchecked_rules
+                         if assessments else []),
     )

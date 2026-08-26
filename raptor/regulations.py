@@ -227,6 +227,17 @@ class RegulatoryProfile:
     structure_overfly_margin_m: float = 15.0
 
     # ── 101.160 — urban operations ────────────────────────────────────
+    #: Horizontal separation from uninvolved persons and from
+    #: structures, in a populated area [m].
+    #:
+    #: **Not checked, and it cannot be** — checking it needs a building
+    #: footprint and crowd layer, and RAPTOR has terrain and airspace
+    #: zones. The numbers are carried so a report can state the rule the
+    #: operation is subject to, and :meth:`unenforceable_rules` names
+    #: them so the omission is declared rather than merely absent.
+    #:
+    #: This matters for what a compliance verdict means: "compliant"
+    #: from this package is compliant *with the rules it can see*.
     min_separation_persons_m: float = 30.0
     min_separation_buildings_m: float = 30.0
 
@@ -248,6 +259,8 @@ class RegulatoryProfile:
     autonomous_range_m: float = 1000.0
 
     # ── 101.215 — operating limitations ───────────────────────────────
+    #: Minimum flight visibility [m]. Also unenforceable here: it is a
+    #: weather minimum, and the wind model carries no visibility.
     min_visibility_m: float = 5000.0
 
     #: Effort weights for each permit family.
@@ -315,6 +328,25 @@ class RegulatoryProfile:
         if ctx.has_uoc or ctx.has_special_authorization:
             return None
         return self.autonomous_range_m
+
+    def unenforceable_rules(self) -> List[str]:
+        """
+        Rules this profile carries that nothing in the package checks.
+
+        Every one of them needs data RAPTOR does not have — building
+        footprints, crowd locations, a weather feed. Listing them is the
+        difference between a limitation and an oversight: a reader of a
+        compliance verdict is entitled to know which rules were tested
+        and which were only named.
+        """
+        return [
+            f"RDAC 101.160: {self.min_separation_persons_m:.0f} m from "
+            f"uninvolved persons and {self.min_separation_buildings_m:.0f} m "
+            f"from structures in populated areas — needs a building and "
+            f"crowd layer; not modelled.",
+            f"RDAC 101.215: {self.min_visibility_m/1000:.0f} km minimum "
+            f"flight visibility — a weather minimum; not modelled.",
+        ]
 
     def summary(self) -> str:
         """Human-readable description of the binding limits."""

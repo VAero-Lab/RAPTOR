@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# Generated figures. Regenerate with:
+#   python -m scripts.make_figures --out figures/current
+figures/
+
+# Cached aerodynamic polars. Regenerate with ac.build_polar(); each takes
+# a few minutes of AeroSandbox solves and is keyed by wing geometry, so a
+# stale one is never served for the wrong aircraft.
+data/polars/
+
+# Cached elevation queries from OpenTopoData. Purely a network cache —
+# safe to delete, costs quota to rebuild.
+data/elevation_cache.npz
+
+# Editor
+.vscode/
+.idea/
+
+# Rasters unpacked from the archives in data/TIF_files. Regenerated on
+# demand by scripts/build_dem.py; the .tar.gz is the committed source.
+data/TIF_files/output_be.tif
+data/TIF_files/viz.*.tif
+
+# Measured OCV data, downloaded on demand and CC BY 4.0. Fetch with:
+#   python -m scripts.extract_ocv --all --download
+data/ocv/*.mat

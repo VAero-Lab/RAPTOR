@@ -208,19 +208,45 @@ HANGARS = [f for f in ALL_FACILITIES if f.is_hangar]
 SUB_CENTERS = [f for f in ALL_FACILITIES if f.facility_type == "sub_center"]
 
 
-def update_facility_elevations(dem) -> None:
+def update_facility_elevations(dem, verbose: bool = False) -> list:
     """
-    Update all facility ground elevations using the actual DEM.
+    Replace declared facility elevations with the terrain model's.
+
+    The elevations in this file were entered by hand and most of them are
+    wrong — thirteen of fifteen disagree with the DEM by more than 10 m,
+    one by 499 m. That is not a cosmetic error: departure and arrival
+    phases are built from the declared value, so the whole altitude
+    schedule of a mission starts from the wrong datum, and a 60 m error
+    is most of the legal corridor.
+
+    This function existed before but nothing called it, so the catalogue
+    always used the typed-in numbers. :func:`build_scenario_catalog` now
+    calls it whenever it is given a DEM.
 
     Parameters
     ----------
     dem : DEMInterface
-        The loaded DEM model.
+    verbose : bool
+        Print each correction.
+
+    Returns
+    -------
+    List of ``(name, declared, actual)`` for every facility that moved.
     """
+    changed = []
     for fac in ALL_FACILITIES:
         elev = dem.elevation(fac.lat, fac.lon)
-        if not np.isnan(elev):
-            fac.ground_elev = float(elev)
+        if np.isnan(elev):
+            continue
+        before = float(fac.ground_elev)
+        after = float(elev)
+        if abs(after - before) > 0.5:
+            changed.append((fac.name, before, after))
+            if verbose:
+                print(f"  {fac.name}: {before:.0f} → {after:.0f} m "
+                      f"({after - before:+.0f})")
+        fac.ground_elev = after
+    return changed
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -376,9 +402,17 @@ class FlightScenario:
 # SCENARIO DEFINITIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def build_scenario_catalog() -> Dict[str, FlightScenario]:
+def build_scenario_catalog(dem=None) -> Dict[str, FlightScenario]:
     """
     Build the complete catalog of medical delivery scenarios.
+
+    Parameters
+    ----------
+    dem : DEMInterface, optional
+        When given, facility elevations are taken from the terrain model
+        instead of the values typed into this file — most of which are
+        wrong, several by tens of metres. Pass it unless you have a
+        reason not to.
 
     Returns a dictionary of scenario_id → FlightScenario.
 
@@ -389,6 +423,9 @@ def build_scenario_catalog() -> Dict[str, FlightScenario]:
     - Long-range with multiple altitude levels
     - Multi-stop logistics tours
     """
+    if dem is not None:
+        update_facility_elevations(dem)
+
     catalog = {}
 
     # ══════════════════════════════════════════════════════════════════════

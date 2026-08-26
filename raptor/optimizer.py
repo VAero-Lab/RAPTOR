@@ -63,6 +63,13 @@ from .compliance import ComplianceAssessment, ComplianceLevel, assess_compliance
 # OPTIMIZATION MODE
 # ═══════════════════════════════════════════════════════════════════════════
 
+#: The constraint terms a penalty breakdown carries, in the order a
+#: history figure should stack them. Named here rather than read off the
+#: dataclass so the figure's legend order is stable.
+PENALTY_TERMS = ("corridor", "prohibited", "ceiling", "soc", "time",
+                 "endpoint", "permit", "waiver", "activation")
+
+
 class OptMode(Enum):
     """Optimization objective type."""
     ENERGY = "energy"       # Minimize battery consumption
@@ -147,6 +154,11 @@ class OptimizationResult:
     #: a route that could not legally be flown, so a negative number is
     #: the price of compliance rather than a failure to optimize.
     initial_feasible: bool = True
+    #: Per-generation record of the objective *and* the constraint
+    #: penalties behind it. The convergence curve alone says the search
+    #: improved; this says which constraint it stopped violating, which
+    #: is the half a reader needs in order to trust the answer.
+    penalty_history: List[dict] = field(default_factory=list)
 
     def summary(self) -> str:
         """Human-readable result summary."""
@@ -214,7 +226,7 @@ class OptimizationResult:
     def regulatory_summary(self) -> str:
         """Compact one-line verdict, for tables and logs."""
         if self.compliance is not None:
-            return self.compliance.verdict()
+            return self.compliance.verdict()   # accounts for safety too
         if not self.fully_feasible:
             return "INFEASIBLE"
         if self.permits_required:
@@ -285,6 +297,35 @@ class PathOptimizer:
         self.penalty_time = 20.0
         self.penalty_endpoint = 10.0
 
+    def _envelope_bounds(self, path: FlightPath):
+        """
+        Segment parameter bounds, narrowed to the aircraft's real envelope.
+
+        ``FWCruise.parameter_bounds`` and friends are class constants —
+        (15, 35) m/s regardless of the wing. Once the envelope is derived
+        from the aerodynamics those constants are no longer consistent
+        with it, and the widest bound wins unless they are intersected.
+        """
+        bounds = list(path.parameter_bounds)
+        names = []
+        for seg in path.segments:
+            names.extend(seg.parameter_names)
+
+        v_lo, v_hi = self.uav.fw_min_airspeed, self.uav.fw_max_airspeed
+        out = []
+        for i, (lo, hi) in enumerate(bounds):
+            name = names[i] if i < len(names) else ""
+            if name == "airspeed":
+                lo, hi = max(lo, v_lo), min(hi, v_hi)
+                if lo >= hi:                 # envelope disjoint from the class bound
+                    lo, hi = v_lo, v_hi
+            elif name == "climb_angle_deg":
+                hi = min(hi, self.uav.fw_max_climb_angle)
+            elif name == "descent_angle_deg":
+                hi = min(hi, self.uav.fw_max_descent_angle)
+            out.append((lo, hi))
+        return out
+
     # ── Shared constraint evaluation ──────────────────────────────────────
 
     def _score(self, fp: FlightPath, energy_result, min_soc: float,
@@ -328,6 +369,7 @@ class PathOptimizer:
         self._best_obj = np.inf
         self._convergence_history = []
         self._parameter_history = []
+        self._penalty_history = []
         self._generation = 0
         self._callback_interval = 1  # record every N generations
 
@@ -413,7 +455,11 @@ class PathOptimizer:
         T_scale = max(initial_time_s, 60.0)       # s
 
         # ── Prepare bounds ────────────────────────────────────────────────
-        bounds = initial_path.parameter_bounds
+        # Segment classes declare generic bounds that know nothing about
+        # this aircraft. Intersect them with the actual flight envelope,
+        # or the optimizer is free to select an airspeed below the wing's
+        # stall speed and be rewarded for it.
+        bounds = self._envelope_bounds(initial_path)
         theta_0 = initial_path.parameter_vector.copy()
         n_params = len(theta_0)
 
@@ -441,6 +487,7 @@ class PathOptimizer:
         self._best_obj = np.inf
         self._convergence_history = []
         self._parameter_history = []
+        self._penalty_history = []
         self._generation = 0
 
         # ── Build objective function ──────────────────────────────────────
@@ -569,7 +616,7 @@ class PathOptimizer:
             compliance=assess_compliance(
                 final_path, final_terrain, final_air,
                 regulation=self.regulation, context=self.context,
-                constraints=self.constraints,
+                constraints=self.constraints, airspace=airspace,
             ),
             compliance_notes=self.context.compliance_findings(self.regulation),
             initial_feasible=initial_feasible,
@@ -578,6 +625,7 @@ class PathOptimizer:
             wall_time_s=wall_time,
             convergence_history=self._convergence_history.copy(),
             parameter_history=self._parameter_history.copy(),
+            penalty_history=list(self._penalty_history),
             initial_energy_wh=initial_energy_wh,
             initial_time_s=initial_time_s,
             energy_improvement_pct=energy_imp,
@@ -942,6 +990,7 @@ class PathOptimizer:
         self._best_obj = np.inf
         self._convergence_history = []
         self._parameter_history = []
+        self._penalty_history = []
         self._generation = 0
 
         # ── Objective function ───────────────────────────────────────
@@ -987,6 +1036,29 @@ class PathOptimizer:
             if obj_val < self._best_obj:
                 self._best_obj = obj_val
             self._convergence_history.append(self._best_obj)
+
+            # The penalty breakdown at this generation. The objective
+            # alone says the search improved; this says which constraint
+            # it stopped violating to do it, which is the half a reader
+            # needs to trust the answer.
+            try:
+                routed_path.parameter_vector = xk
+                fp_h = routed_path.flight_path
+                er_h = analyze_path_energy(fp_h, ac, SOC_min=min_soc)
+                sc = self._score(fp_h, er_h, min_soc, max_flight_time,
+                                 airspace=airspace,
+                                 ceiling_waivable=allow_height_waiver)
+                self._penalty_history.append(dict(
+                    generation=self._generation,
+                    total=float(sc.total),
+                    energy_wh=float(er_h.total_energy_wh),
+                    time_s=float(er_h.total_time),
+                    soc_final=float(er_h.SOC_final),
+                    feasible=bool(sc.feasible),
+                    **{k: float(getattr(sc, k)) for k in PENALTY_TERMS},
+                ))
+            except Exception:
+                pass
 
             if self._generation % max(1, maxiter // 20) == 0:
                 self._parameter_history.append(xk.copy())
@@ -1155,6 +1227,7 @@ class PathOptimizer:
             wall_time_s=wall_time,
             convergence_history=self._convergence_history.copy(),
             parameter_history=self._parameter_history.copy(),
+            penalty_history=list(self._penalty_history),
             initial_energy_wh=initial_energy_wh,
             initial_time_s=initial_time_s,
             energy_improvement_pct=energy_imp,

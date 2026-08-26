@@ -62,6 +62,59 @@ class FacilityNode:
         return (self.lat, self.lon)
 
 
+def check_facility_elevations(facilities, dem, tolerance_m: float = 10.0) -> list:
+    """
+    Compare declared facility elevations against the terrain model.
+
+    Pad elevations are typed into scripts and scenario files by hand, and
+    nothing forces them to agree with the DEM. When they disagree, the
+    departure and arrival phases are built against the wrong ground: the
+    aircraft is told to climb from an altitude it is not at, and lands at
+    one the terrain does not occupy. A 23 m error — which is what
+    ``CS.Conocoto`` carried — is a fifth of the whole legal corridor.
+
+    Parameters
+    ----------
+    facilities : iterable
+        Anything with ``lat``, ``lon`` and either ``ground_elev`` or
+        ``elevation``. ``FacilityNode`` and ``Facility`` both qualify.
+    dem : DEMInterface
+    tolerance_m : float
+        Disagreement worth reporting. A few metres is ordinary DEM
+        error; tens of metres is a wrong number.
+
+    Returns
+    -------
+    List of human-readable findings, worst first. Empty means every
+    facility agrees with the terrain.
+    """
+    import numpy as np
+
+    findings = []
+    for f in facilities:
+        declared = getattr(f, "ground_elev", None)
+        if declared is None:
+            declared = getattr(f, "elevation", None)
+        if declared is None:
+            continue
+        actual = float(dem.elevation(f.lat, f.lon))
+        if not np.isfinite(actual):
+            findings.append((float("inf"),
+                             f"{getattr(f, 'name', '?')}: outside the DEM at "
+                             f"{f.lat:.4f}, {f.lon:.4f} — no terrain to check "
+                             f"the declared {declared:.0f} m against."))
+            continue
+        diff = float(declared) - actual
+        if abs(diff) > tolerance_m:
+            findings.append((abs(diff),
+                             f"{getattr(f, 'name', '?')}: declared "
+                             f"{declared:.0f} m, DEM says {actual:.0f} m "
+                             f"({diff:+.0f} m). Departure and arrival are "
+                             f"built against the declared value."))
+    findings.sort(key=lambda t: -t[0])
+    return [msg for _, msg in findings]
+
+
 class PathBuilder:
     """
     Builds feasible flight paths between facilities over real terrain.

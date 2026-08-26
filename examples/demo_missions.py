@@ -14,8 +14,9 @@ the least remaining charge; a supply tour gets lighter. Everything else
 is equal, so the difference is what payload *ordering* alone costs.
 
 Usage:
-    python -m examples.demo_missions
-    python -m examples.demo_missions --maxiter 40 --plan
+    python -m examples.demo_missions                    # shapes only, fast
+    python -m examples.demo_missions --plan             # optimize them all
+    python -m examples.demo_missions --case one_way     # just one, optimized
 """
 
 from __future__ import annotations
@@ -29,12 +30,35 @@ from raptor.dem import DEMInterface, find_dem
 from raptor.energy import AircraftEnergyParams
 from raptor.mission_planner import MissionPlanner
 from raptor.missions import (
-    BatteryAction, hub_and_spoke, out_and_back, sample_collection,
+    BatteryAction, hub_and_spoke, one_way, out_and_back, sample_collection,
     shuttle, supply_tour,
 )
 from raptor.scenarios import (
     CS_LLOA, CS_PINTAG, HOSPITAL_ENRIQUE_GARCES, HOSPITAL_EUGENIO_ESPEJO,
 )
+from raptor.vehicles import get_vehicle
+
+
+def build_missions(base, centres, near):
+    """
+    Every mission shape, keyed by the name ``--case`` takes.
+
+    Kept as a dict rather than a list so a reader can run one case
+    without waiting for the rest — a hub-and-spoke round is four legs of
+    optimisation and the whole set is a coffee break.
+    """
+    return {
+        "one_way": one_way(base, near, payload_kg=2.0),
+        "out_and_back": out_and_back(base, near, payload_out_kg=2.0),
+        "sample_collection": sample_collection(base, centres, per_stop_kg=0.7),
+        "supply_tour": supply_tour(base, centres, per_stop_kg=0.7),
+        "hub_and_spoke": hub_and_spoke(base, centres, payload_kg=2.0),
+        "hub_and_spoke_no_spare": hub_and_spoke(
+            base, centres, payload_kg=2.0,
+            battery_action=BatteryAction.NONE,
+            name="Hub and spoke, no spare pack", mission_id="HS-nobat"),
+        "shuttle": shuttle(base, near, n_round_trips=2, payload_kg=2.0),
+    }
 
 
 def rule(title: str):
@@ -49,22 +73,24 @@ def main() -> int:
     ap.add_argument("--popsize", type=int, default=5)
     ap.add_argument("--plan", action="store_true",
                     help="actually optimize the missions (slow)")
+    ap.add_argument("--case", metavar="NAME",
+                    help="optimize just this one case (implies --plan)")
+    ap.add_argument("--vehicle", default="va23")
     args = ap.parse_args()
 
     base = HOSPITAL_EUGENIO_ESPEJO
     centres = [CS_LLOA, CS_PINTAG]
+    near = HOSPITAL_ENRIQUE_GARCES
 
-    missions = [
-        out_and_back(base, CS_LLOA, payload_out_kg=2.0),
-        sample_collection(base, centres, per_stop_kg=0.7),
-        supply_tour(base, centres, per_stop_kg=0.7),
-        hub_and_spoke(base, centres, payload_kg=2.0),
-        shuttle(base, CS_LLOA, n_round_trips=2, payload_kg=2.0),
-        hub_and_spoke(base, centres, payload_kg=2.0,
-                      battery_action=BatteryAction.NONE,
-                      name="Hub and spoke, no spare pack",
-                      mission_id="HS-nobat"),
-    ]
+    catalog = build_missions(base, centres, near)
+    if args.case:
+        if args.case not in catalog:
+            ap.error(f"unknown case {args.case!r}; "
+                     f"choose from {', '.join(catalog)}")
+        missions = [catalog[args.case]]
+        args.plan = True
+    else:
+        missions = list(catalog.values())
 
     rule("1. THE MISSION SHAPES")
     for m in missions:
@@ -92,8 +118,13 @@ def main() -> int:
 
     rule("3. FLYING THEM")
     dem = DEMInterface(find_dem())
-    uav, con = UAVConfig(), MissionConstraints()
-    ac = AircraftEnergyParams()
+    con = MissionConstraints()
+    # A real aircraft with both halves of its aero model, and an envelope
+    # derived at the loaded mass. UAVConfig() and a bare
+    # AircraftEnergyParams() would give a plausible answer for a wing
+    # with no airframe attached to it.
+    ac = get_vehicle(args.vehicle).build_aero(verbose=False)
+    uav = UAVConfig.for_vehicle(ac.with_payload(2.0), altitude=2800.0)
     airspace = build_airspace(dem=dem)
     planner = MissionPlanner(dem, uav, con, ac, airspace=airspace)
 

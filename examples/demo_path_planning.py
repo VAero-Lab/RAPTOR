@@ -30,8 +30,7 @@ def main():
     parser.add_argument('--fig-dir', type=str, default='figures')
     args = parser.parse_args()
 
-    args._static_dir = os.path.join(args.fig_dir, 'demo_path', 'static')
-    args._interactive_dir = os.path.join(args.fig_dir, 'demo_path', 'interactive')
+    args._static_dir = os.path.join(args.fig_dir, 'demo_path')
 
     print("=== Demo: Path Planning Pipeline ===\n")
     dem = DEMInterface(find_dem())
@@ -65,7 +64,6 @@ def main():
     if args.plot:
         import matplotlib; matplotlib.use('Agg')
         from raptor.visualization import plot_all
-        from raptor.visualization_plotly import plot_all as iplot_all
         import matplotlib.pyplot as plt
 
         common_kwargs = dict(
@@ -82,8 +80,6 @@ def main():
         print(f"\nSaved {len(figs)} PNG figures to {args._static_dir}/")
 
         # Plotly (HTML)
-        ifigs = iplot_all(**common_kwargs, save_dir=args._interactive_dir)
-        print(f"Saved {len(ifigs)} HTML figures to {args._interactive_dir}/")
 
 if __name__ == '__main__':
     main()

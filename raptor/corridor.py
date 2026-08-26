@@ -56,9 +56,17 @@ class CorridorProfile:
     altitudes : ndarray
         Reference altitude at each breakpoint [m AMSL].
     sample_distances, sample_altitudes, sample_terrain : ndarray
-        The dense pre-simplification profile, for plotting and analysis.
+        The flown profile at dense spacing: distance, the altitude the
+        breakpoint polyline actually passes through, and the terrain
+        underneath. Every check and every plot uses these.
+    envelope_altitudes : ndarray
+        The dense reference before simplification — the lowest profile
+        the aircraft's climb and descent angles would allow. Kept for
+        diagnostics: the gap between it and ``sample_altitudes`` is the
+        price of flying a finite number of segments.
     agl : ndarray
-        Height above ground at the dense samples [m].
+        Height of the *flown* profile above ground at the dense
+        samples [m].
     target_agl : float
         The AGL the leg was asked to hold [m].
     max_agl : float
@@ -77,6 +85,7 @@ class CorridorProfile:
     sample_distances: np.ndarray
     sample_altitudes: np.ndarray
     sample_terrain: np.ndarray
+    envelope_altitudes: np.ndarray
     agl: np.ndarray
     target_agl: float
     max_agl: float
@@ -163,15 +172,30 @@ def climb_limited_envelope(
 
 
 def _simplify(distances: np.ndarray, altitudes: np.ndarray,
-              tol_m: float, max_points: int) -> Tuple[np.ndarray, np.ndarray]:
+              tol_m: float, max_points: int,
+              max_dip_m: float = 0.0,
+              tol_cap_m: float = None) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Reduce a dense profile to breakpoints within ``tol_m`` vertically.
+    Reduce a dense profile to breakpoints, without ever flying lower.
 
     Ramer–Douglas–Peucker on the (distance, altitude) polyline, measuring
     error vertically rather than perpendicularly — the vertical error is
-    what the clearance and ceiling checks care about. If the result still
-    exceeds ``max_points``, the tolerance is relaxed until it fits, so the
-    number of flight segments stays bounded whatever the terrain.
+    what the clearance and ceiling checks care about.
+
+    The subtlety is that the two directions of error are not equivalent.
+    The dense profile here is the *lowest flyable reference*: terrain plus
+    the target height, dilated upward by whatever the aircraft's climb and
+    descent angles force. A chord that runs above it costs ceiling
+    headroom, which is measurable and penalised. A chord that cuts below
+    it flies the aircraft nearer the ground than the corridor floor
+    allows, which is a clearance breach the profile then reports as
+    clean, because the report is computed from the dense reference the
+    aircraft is not flying.
+
+    So after the split, breakpoints are raised until no chord dips more
+    than ``max_dip_m`` below the reference. Clearance then holds by
+    construction and the price is paid in ceiling headroom, where it is
+    visible.
     """
     n = len(distances)
     if n <= 2:
@@ -196,15 +220,52 @@ def _simplify(distances: np.ndarray, altitudes: np.ndarray,
         rdp(i0, k, tol, keep)
         rdp(k, i1, tol, keep)
 
+    # Relaxing the tolerance to meet the point budget is bounded by
+    # ``tol_cap``. Past that the chord can no longer sit inside the
+    # corridor at all, so further relaxation buys segment count at the
+    # price of a profile that is nowhere near the terrain; better to
+    # spend the extra breakpoints and let the caller see the count.
+    tol_cap = max(tol_m, float(tol_cap_m)) if tol_cap_m else float("inf")
     tol = tol_m
     for _ in range(12):
         keep: List[int] = [0, n - 1]
         rdp(0, n - 1, tol, keep)
         idx = np.array(sorted(set(keep)))
-        if len(idx) <= max_points:
+        if len(idx) <= max_points or tol >= tol_cap:
             break
-        tol *= 1.6
-    return distances[idx], altitudes[idx]
+        tol = min(tol * 1.6, tol_cap)
+
+    bp_d = distances[idx].astype(float)
+    bp_a = altitudes[idx].astype(float).copy()
+
+    # ── Clearance repair ──────────────────────────────────────────────
+    # Walk each chord, find the worst place the reference pokes through
+    # it, and lift that chord's two endpoints by the deficit. Lifting an
+    # endpoint changes its neighbour too, so iterate; in practice this
+    # settles in two or three passes because every pass is monotonically
+    # upward and bounded by the profile's own maximum.
+    for _ in range(8):
+        worst = 0.0
+        for k in range(len(bp_d) - 1):
+            lo = int(np.searchsorted(distances, bp_d[k], side="left"))
+            hi = int(np.searchsorted(distances, bp_d[k + 1], side="right"))
+            if hi - lo < 3:
+                continue
+            span = bp_d[k + 1] - bp_d[k]
+            if span <= 0:
+                continue
+            t = (distances[lo:hi] - bp_d[k]) / span
+            chord = bp_a[k] + t * (bp_a[k + 1] - bp_a[k])
+            deficit = float(np.max(altitudes[lo:hi] - chord))
+            if deficit > max_dip_m:
+                lift = deficit - max_dip_m
+                bp_a[k] += lift
+                bp_a[k + 1] += lift
+                worst = max(worst, lift)
+        if worst < 0.05:
+            break
+
+    return bp_d, bp_a
 
 
 def build_corridor_profile(
@@ -216,8 +277,8 @@ def build_corridor_profile(
     max_descent_angle_deg: float,
     max_agl: float = 122.0,
     sample_spacing_m: float = None,
-    simplify_tol_m: float = 12.0,
-    max_breakpoints: int = 12,
+    simplify_tol_m: float = 6.0,
+    max_breakpoints: int = 24,
     angle_margin: float = 0.75,
 ) -> CorridorProfile:
     """
@@ -244,9 +305,16 @@ def build_corridor_profile(
         profile dipping ~30 m below its target height on real corridors.
     simplify_tol_m : float
         Vertical tolerance when reducing the profile to breakpoints [m].
-        Must stay well inside the corridor height.
+        Must stay well inside the corridor height, and is never relaxed
+        past the headroom between ``target_agl`` and ``max_agl``.
     max_breakpoints : int
-        Cap on breakpoints, bounding the number of flight segments.
+        Soft cap on breakpoints, bounding the number of flight segments.
+        Soft because clearance comes first: if the budget cannot be met
+        without a tolerance wider than the corridor, the extra
+        breakpoints are spent. On 30 m terrain 24 is where the ceiling
+        exceedance on the Espejo–Guamaní corridor reaches zero; 12,
+        which sufficed on a 186 m grid, left 19 m of exceedance over a
+        fifth of the leg.
     angle_margin : float
         Fraction of the aircraft's limit angles used for the envelope,
         leaving authority for disturbance rejection and altitude hold.
@@ -295,17 +363,30 @@ def build_corridor_profile(
     env = climb_limited_envelope(terr, step, tan_climb, tan_desc)
     ref = env + float(target_agl)
 
-    agl = ref - terr
-    excess = np.maximum(agl - max_agl, 0.0)
+    # Tolerance may not be relaxed past the headroom between the target
+    # height and the ceiling: an error larger than the corridor is tall
+    # cannot be absorbed by the corridor.
+    headroom = max(float(max_agl) - float(target_agl), 5.0)
+    bp_d, bp_a = _simplify(d, ref, simplify_tol_m, max_breakpoints,
+                           tol_cap_m=headroom)
 
-    bp_d, bp_a = _simplify(d, ref, simplify_tol_m, max_breakpoints)
+    # Everything below is measured on the polyline the aircraft actually
+    # flies, not on the dense reference it was simplified from. Those are
+    # different profiles — simplification lifts the flown one to keep
+    # clearance — and reporting the reference's numbers for the flown
+    # path is how a leg comes back "FITS" while the aircraft it describes
+    # is 30 m over the ceiling.
+    flown = np.interp(d, bp_d, bp_a)
+    agl = flown - terr
+    excess = np.maximum(agl - max_agl, 0.0)
 
     return CorridorProfile(
         distances=bp_d,
         altitudes=bp_a,
         sample_distances=d,
-        sample_altitudes=ref,
+        sample_altitudes=flown,
         sample_terrain=terr,
+        envelope_altitudes=ref,
         agl=agl,
         target_agl=float(target_agl),
         max_agl=float(max_agl),

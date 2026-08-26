@@ -210,15 +210,27 @@ class MissionPlanner:
         constraints: MissionConstraints,
         ac: AircraftEnergyParams,
         airspace: AirspaceManager = None,
-        battery_wh: float = 600.0,
+        battery_wh: float = None,
         min_soc: float = 0.15,
     ):
+        """
+        Parameters
+        ----------
+        battery_wh : float, optional
+            Usable pack energy [Wh]. Defaults to the aircraft's own,
+            which is what it should always have been: this was a
+            hard-coded 600 Wh, so every mission's state of charge was
+            tracked against a pack that had nothing to do with the
+            aircraft flying it. On the VA23's 867 Wh of usable energy
+            that overstated depletion by 45 %.
+        """
         self.dem = dem
         self.uav = uav
         self.constraints = constraints
         self.ac = ac
         self.airspace = airspace
-        self.battery_wh = battery_wh
+        self.battery_wh = (float(battery_wh) if battery_wh
+                           else float(ac.battery_usable_wh))
         self.min_soc = min_soc
         self.optimizer = PathOptimizer(dem, uav, constraints, ac)
         self.terrain_analyzer = TerrainAnalyzer(dem, constraints)
@@ -265,6 +277,16 @@ class MissionPlanner:
             OptPriority.BALANCED: OptMode.MULTI,
         }
         mode = mode_map.get(scenario.priority, OptMode.ENERGY)
+
+        # The urgency's own limits, which until now went nowhere. A
+        # scenario could be marked EMERGENCY — 15 minutes a leg and a
+        # 20 % state-of-charge floor instead of an hour and 15 % — and
+        # plan_mission would optimise it exactly like a routine resupply,
+        # because it passed neither figure to the optimizer. The whole
+        # time-constrained half of the model was unreachable through the
+        # entry point the missions actually use.
+        max_time = scenario.urgency.max_flight_time_s()
+        leg_min_soc = scenario.urgency.min_soc_percent()
         air = self.airspace if use_airspace else None
 
         current_soc = 1.0
@@ -304,6 +326,8 @@ class MissionPlanner:
                 rp, mode=mode,
                 payload_kg=leg.payload_kg,
                 airspace=air,
+                max_flight_time=max_time,
+                min_soc=leg_min_soc,
                 maxiter=maxiter,
                 popsize=popsize,
                 verbose=False,
@@ -319,15 +343,26 @@ class MissionPlanner:
                 seed=(seed + leg_idx) if seed is not None else None,
             )
 
-            # Evaluate the optimized path
+            # Evaluate the optimized path, carrying what this leg
+            # carries. The optimizer was given the payload; re-analysing
+            # with the empty aircraft answered a different question and
+            # under-reported the energy by 15 % on a 2 kg delivery.
             fp = rp.flight_path
-            energy_result = analyze_path_energy(fp, self.ac, SOC_min=self.min_soc)
+            loaded = (self.ac.with_payload(leg.payload_kg)
+                      if leg.payload_kg else self.ac)
+            energy_result = analyze_path_energy(fp, loaded,
+                                                SOC_min=leg_min_soc)
             terrain_report = self.terrain_analyzer.analyze(fp)
             airspace_report = air.check_path(fp) if air else None
 
-            # SOC coupling
+            # SOC coupling. Advanced on the energy that leaves the
+            # *cells*, not on what reaches the drivetrain: the I2R heat
+            # is drawn from the same pack and never arrives, so charging
+            # the mission only for what arrived leaves the pack fuller
+            # than it is.
             soc_start = current_soc
-            energy_used_frac = energy_result.total_energy_wh / self.battery_wh
+            energy_used_frac = (energy_result.energy_from_cells_wh
+                                / max(self.battery_wh, 1e-9))
             soc_end = max(soc_start - energy_used_frac, 0.0)
 
             # Ground operations at the stop this leg *arrives* at.
@@ -417,7 +452,7 @@ class MissionPlanner:
             rp = RoutedPath(orig, dest, self.dem, self.uav,
                            self.constraints, n_intermediate=0)
             fp = rp.flight_path
-            er = analyze_path_energy(fp, self.ac)
+            er = analyze_path_energy(fp, self.ac)   # quick check, no payload
             soc_used = er.total_energy_wh / self.battery_wh
             soc_end = max(current_soc - soc_used, 0.0)
 

@@ -1662,11 +1662,17 @@ def plot_three_path_comparison(
         ax.set_xlim(*lo); ax.set_ylim(*lr)
         ax.set_xlabel("Longitude [°]"); ax.set_ylabel("Latitude [°]")
         ax.set_title(lbl, fontsize=10, fontweight='bold'); ax.grid(True, alpha=0.2)
-        info = f"E = {e_r.total_energy_wh:.0f} Wh\nt = {e_r.total_time / 60:.1f} min\nAirV = {ar_r.n_violations}"
+        # Hard violations only. The total now includes permit-zone
+        # entries, which are legal once authorised, so labelling them
+        # "violations" would misreport a flyable route.
+        info = (f"E = {e_r.total_energy_wh:.0f} Wh\n"
+                f"t = {e_r.total_time / 60:.1f} min\n"
+                f"blocked = {len(ar_r.hard_violations)}\n"
+                f"permits = {len(ar_r.permits_required)}")
         ax.text(0.02, 0.98, info, transform=ax.transAxes, fontsize=7,
                 va='top', fontfamily='monospace',
                 bbox=dict(boxstyle='round', fc='white', alpha=0.9))
-        f_label = "FEASIBLE" if ar_r.feasible else "INFEASIBLE"
+        f_label = ("LEGAL" if ar_r.feasible else "BLOCKED")
         f_color = '#43A047' if ar_r.feasible else '#E53935'
         ax.text(0.98, 0.02, f_label, transform=ax.transAxes,
                 fontsize=8, va='bottom', ha='right', fontweight='bold', color=f_color,
@@ -1709,8 +1715,7 @@ def plot_vehicle_comparison(altitude=2850.0, airspeed=25.0,
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     alts = np.linspace(0, 5500, 100)
-    v_colors = {'baseline': '#2196F3', 'heavy_cargo': '#F44336',
-                'long_range': '#4CAF50', 'high_altitude': '#9C27B0'}
+    v_colors = {'va17': '#2196F3', 'va23': '#F44336', 'va25': '#4CAF50'}
     for name, color in v_colors.items():
         ac_v = get_vehicle(name)
         vs_safe = [ac_v.stall_speed_at(a) * 1.3 for a in alts]

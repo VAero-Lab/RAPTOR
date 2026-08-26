@@ -359,3 +359,93 @@ def _haversine_m(lat0: float, lon0: float,
     dlam = np.radians(lons - lon0)
     a = np.sin(dphi / 2) ** 2 + np.cos(phi0) * np.cos(phi) * np.sin(dlam / 2) ** 2
     return 2 * R * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+
+
+def check_path_envelope(path, uav, constraints=None) -> list:
+    """
+    Is every segment of this path inside the aircraft's own envelope?
+
+    ``UAVConfig`` has carried six validators — airspeed, climb and
+    descent angle, VTOL climb and descent rate, altitude — since the
+    package was written, and nothing called any of them. The path
+    builder constructs segments from those same limits, so in practice
+    the results came out inside the envelope; but that was a property of
+    the builder, not a checked fact, and it would have gone on being
+    true silently right up until it stopped.
+
+    This is the call site they were missing. It is cheap, it runs on the
+    finished path rather than inside the search, and it turns an
+    accidental guarantee into a verified one.
+
+    Returns
+    -------
+    list of str, empty when every segment is inside the envelope.
+    """
+    problems = []
+    counts = {}
+
+    def note(kind: str, value: float, limit: str):
+        entry = counts.setdefault(kind, {"n": 0, "worst": value, "limit": limit})
+        entry["n"] += 1
+        entry["worst"] = max(entry["worst"], value, key=abs) \
+            if isinstance(value, float) else value
+
+    for seg in path.segments:
+        k = seg.kinematics
+        kind = seg.segment_type.value
+
+        if kind in ("FW_CRUISE", "FW_CLIMB", "FW_DESCEND"):
+            if k.airspeed > 0 and not uav.validate_fw_airspeed(k.airspeed):
+                note("airspeed outside the envelope", float(k.airspeed),
+                     f"{uav.fw_min_airspeed:.1f}–{uav.fw_max_airspeed:.1f} m/s")
+        if kind == "FW_CLIMB":
+            g = abs(float(k.flight_path_angle))
+            if g > 0 and not uav.validate_fw_climb_angle(g):
+                note("climb angle steeper than the propulsion allows", g,
+                     f"{uav.fw_max_climb_angle:.1f} deg")
+        if kind == "FW_DESCEND":
+            g = abs(float(k.flight_path_angle))
+            if g > 0 and not uav.validate_fw_descent_angle(g):
+                note("descent angle steeper than the airframe can hold", g,
+                     f"{uav.fw_max_descent_angle:.1f} deg")
+        if kind == "VTOL_ASCEND":
+            v = abs(float(k.vertical_speed))
+            if v > 0 and not uav.validate_vtol_climb(v):
+                note("VTOL climb rate over the limit", v,
+                     f"{uav.vtol_max_climb_rate:.2f} m/s")
+        if kind == "VTOL_DESCEND":
+            v = abs(float(k.vertical_speed))
+            if v > 0 and not uav.validate_vtol_descent(v):
+                note("VTOL descent rate into the vortex-ring band", v,
+                     f"{uav.vtol_max_descent_rate:.2f} m/s")
+
+    for kind, e in counts.items():
+        problems.append(
+            f"{e['n']} segment(s): {kind} — worst {e['worst']:.2f}, "
+            f"limit {e['limit']}"
+        )
+
+    if constraints is not None:
+        # Range. Declared in MissionConstraints since the package was
+        # written and read by nothing, so a route could be twice the
+        # aircraft's stated range and no part of the model would say so.
+        limit = getattr(constraints, "max_range", None)
+        flown = float(getattr(path.metrics, "total_ground_distance", 0.0))
+        if limit and flown > limit:
+            problems.append(
+                f"{flown/1000:.1f} km flown against a {limit/1000:.0f} km "
+                f"range limit. Whether that is reachable is a separate "
+                f"question the energy model answers; this is the declared "
+                f"operational limit, and the route is past it."
+            )
+
+        cap = getattr(constraints, "max_path_segments", None)
+        if cap and len(path.segments) > cap:
+            problems.append(
+                f"{len(path.segments)} segments against a {cap}-segment "
+                f"budget. Not a physical problem — every segment is a "
+                f"power evaluation and the optimizer runs thousands of "
+                f"paths, so this is search cost, not infeasibility."
+            )
+
+    return problems

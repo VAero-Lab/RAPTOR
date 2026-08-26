@@ -613,20 +613,23 @@ def check_flight_envelope(uav, ac, altitude: float = 2800.0,
             f"{np.sqrt(2*ac.W/(rho*ac.S_ref*ac.C_L_max)):.1f} m/s."
         )
 
-    if uav.fw_min_airspeed < v_stall:
+    # Small tolerance so a speed set exactly at the margin does not trip
+    # the check through floating-point rounding.
+    tol = 1e-6 * max(v_safe, 1.0)
+    if uav.fw_min_airspeed < v_stall - tol:
         out.append(
             f"fw_min_airspeed {uav.fw_min_airspeed:.1f} m/s is BELOW the stall "
             f"speed {v_stall:.1f} m/s at {altitude:.0f} m — the optimizer is "
             f"free to select speeds the aircraft cannot fly."
         )
-    elif uav.fw_min_airspeed < v_safe:
+    elif uav.fw_min_airspeed < v_safe - tol:
         out.append(
             f"fw_min_airspeed {uav.fw_min_airspeed:.1f} m/s is below the "
             f"{margin:.2f}x stall margin ({v_safe:.1f} m/s) at "
             f"{altitude:.0f} m."
         )
 
-    if uav.fw_cruise_airspeed < v_safe:
+    if uav.fw_cruise_airspeed < v_safe - tol:
         out.append(
             f"fw_cruise_airspeed {uav.fw_cruise_airspeed:.1f} m/s is below the "
             f"{margin:.2f}x stall margin ({v_safe:.1f} m/s) at "
@@ -634,7 +637,7 @@ def check_flight_envelope(uav, ac, altitude: float = 2800.0,
             f"accept a smaller margin explicitly."
         )
 
-    if uav.fw_max_airspeed <= v_safe:
+    if uav.fw_max_airspeed <= v_safe - tol:
         out.append(
             f"fw_max_airspeed {uav.fw_max_airspeed:.1f} m/s leaves no usable "
             f"speed band above the stall margin at {altitude:.0f} m."

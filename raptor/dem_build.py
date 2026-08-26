@@ -50,6 +50,15 @@ import numpy as np
 
 M_PER_DEG_LAT = 111_320.0
 
+#: Used when a tile declares no ``GDAL_NODATA`` tag. SRTM v3's value.
+DEFAULT_NODATA = -32767.0
+
+#: Any sample below this is treated as void whatever the tags say. The
+#: lowest dry land on Earth is the Dead Sea shore at about -430 m, so
+#: -1000 m is comfortably below anything real and comfortably above
+#: every sentinel in common use.
+VOID_FLOOR_M = -1000.0
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # GRID HELPERS
@@ -101,14 +110,24 @@ def fill_voids(elev: np.ndarray, nodata_mask: np.ndarray,
         out[bad] = neighbour_mean[bad]
 
     if np.isnan(out).any():
-        # Whole regions with no valid neighbour at all: fall back to the
-        # global mean rather than shipping NaN into the planner.
+        if not np.isfinite(out).any():
+            # Nothing to interpolate from. Returning zeros here would ship
+            # a sea-level terrain model into a planner that would then
+            # cheerfully clear every ridge in the Andes.
+            raise ValueError(
+                "every cell is void — the requested area has no elevation "
+                "data at all. Check the bounding box against the tiles' "
+                "coverage."
+            )
+        # Regions with no valid neighbour within reach: fall back to the
+        # mean of what was measured rather than shipping NaN onward.
         out[np.isnan(out)] = float(np.nanmean(out))
     return out
 
 
 def save_dem(path: str, lat_1d: np.ndarray, lon_1d: np.ndarray,
-             elev: np.ndarray, metadata: Dict = None):
+             elev: np.ndarray, metadata: Dict = None,
+             void_mask: np.ndarray = None):
     """
     Write a DEM in the ``.npz`` layout ``DEMInterface`` reads.
 
@@ -126,13 +145,20 @@ def save_dem(path: str, lat_1d: np.ndarray, lon_1d: np.ndarray,
     # float32 and no coordinate meshes: a 30 m grid over a metropolitan
     # area is a few million cells, and storing lat/lon per cell in float64
     # quadruples the file for information the axes already carry.
-    np.savez_compressed(
-        path,
+    payload = dict(
         elev_grid=elev.astype(np.float32),
         lat_1d=lat_1d, lon_1d=lon_1d,
         slope_deg=slope_deg.astype(np.float32),
         metadata=np.array(json.dumps(metadata or {})),
     )
+    # Which cells were interpolated rather than measured. SRTM returns
+    # nothing on steep slopes and water, which over the Andes is exactly
+    # where the terrain matters most — so a planner should be able to ask
+    # whether its corridor crosses invented ground.
+    if void_mask is not None:
+        payload["void_mask"] = np.packbits(np.asarray(void_mask, dtype=bool))
+        payload["void_shape"] = np.array(np.asarray(void_mask).shape)
+    np.savez_compressed(path, **payload)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -149,6 +175,12 @@ class GeoTiffTile:
     dlon: float
     n_rows: int
     n_cols: int
+    nodata: Optional[float] = None
+    """Void sentinel declared by the file itself (GDAL_NODATA tag).
+
+    SRTM v3 tiles declare -32767, NASADEM declares -32768. Reading it
+    from the tag rather than assuming one means a mosaic of both is
+    voided correctly without the caller having to know."""
 
     @property
     def lat_min(self) -> float:
@@ -163,6 +195,78 @@ class GeoTiffTile:
                 and self.lon_min <= lon <= self.lon_max)
 
 
+RASTER_SUFFIXES = (".tif", ".tiff")
+ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar")
+
+
+def expand_tile_archives(paths: Sequence[str],
+                         verbose: bool = True) -> List[str]:
+    """
+    Replace any ``.tar.gz`` in *paths* with the rasters inside it.
+
+    DEM tiles are large and compress well, so they are stored in the
+    repository as archives. Members are extracted next to the archive
+    and reused on later calls, so this costs the unpacking once.
+
+    Paths that are already rasters pass through untouched, which means
+    a caller can hand this a whole directory listing without caring
+    which entries are archives.
+    """
+    import tarfile
+
+    out: List[str] = []
+    for path in paths:
+        low = path.lower()
+        if not low.endswith(ARCHIVE_SUFFIXES):
+            out.append(path)
+            continue
+        dest = os.path.dirname(os.path.abspath(path)) or "."
+        with tarfile.open(path) as tar:
+            members = [m for m in tar.getmembers()
+                       if m.isfile() and m.name.lower().endswith(RASTER_SUFFIXES)]
+            if not members:
+                if verbose:
+                    print(f"  {os.path.basename(path)}: no rasters inside, skipped")
+                continue
+            for m in members:
+                # Refuse absolute paths and parent traversal: an archive
+                # is untrusted input and this writes to disk.
+                name = os.path.normpath(m.name)
+                if os.path.isabs(name) or name.startswith(".."):
+                    raise ValueError(
+                        f"{path}: member {m.name!r} escapes the destination "
+                        f"directory; refusing to extract."
+                    )
+                target = os.path.join(dest, name)
+                if not os.path.exists(target):
+                    if verbose:
+                        print(f"  extracting {name} from "
+                              f"{os.path.basename(path)}")
+                    tar.extract(m, dest)
+                out.append(target)
+    return out
+
+
+def _geokey(geokeys, key_id: int) -> Optional[int]:
+    """Look up a short GeoTIFF GeoKey in a GeoKeyDirectoryTag.
+
+    The tag is a flat array: a four-value header whose last entry is the
+    key count, then one four-value record per key. Only keys stored
+    inline (``location == 0``) are returned; the others live in
+    companion tags this reader has no use for.
+    """
+    if geokeys is None or len(geokeys) < 4:
+        return None
+    n_keys = int(geokeys[3])
+    for i in range(n_keys):
+        base = 4 + 4 * i
+        if base + 3 >= len(geokeys) + 1:
+            break
+        if int(geokeys[base]) == key_id and int(geokeys[base + 1]) == 0:
+            return int(geokeys[base + 3])
+    return None
+
+
 def read_geotiff_tile(path: str) -> Tuple[GeoTiffTile, np.ndarray]:
     """
     Read a GeoTIFF tile and its georeferencing.
@@ -175,7 +279,8 @@ def read_geotiff_tile(path: str) -> Tuple[GeoTiffTile, np.ndarray]:
         import tifffile
     except ImportError as exc:
         raise ImportError(
-            "Reading GeoTIFF tiles needs tifffile: pip install 'raptor[terrain]'. "
+            "Reading GeoTIFF tiles needs tifffile (and imagecodecs for the "
+            "LZW-compressed NASADEM tiles): pip install 'raptor[terrain]'. "
             "Alternatively fetch terrain over the network with "
             "build_dem_from_opentopodata(), which needs nothing extra."
         ) from exc
@@ -184,13 +289,21 @@ def read_geotiff_tile(path: str) -> Tuple[GeoTiffTile, np.ndarray]:
         page = tf.pages[0]
         array = page.asarray()
 
-        scale = tiepoint = None
+        scale = tiepoint = nodata = geokeys = None
         for tag in page.tags:
             name = getattr(tag, "name", "")
             if name == "ModelPixelScaleTag":
                 scale = tag.value
             elif name == "ModelTiepointTag":
                 tiepoint = tag.value
+            elif name == "GeoKeyDirectoryTag":
+                geokeys = tag.value
+            elif name == "GDAL_NODATA":
+                # Stored as an ASCII string, e.g. "-32768".
+                try:
+                    nodata = float(str(tag.value).strip().strip("\x00"))
+                except (TypeError, ValueError):
+                    nodata = None
 
     if scale is None or tiepoint is None:
         raise ValueError(
@@ -202,8 +315,20 @@ def read_geotiff_tile(path: str) -> Tuple[GeoTiffTile, np.ndarray]:
     lon_min, lat_max = float(tiepoint[3]), float(tiepoint[4])
     n_rows, n_cols = array.shape[:2]
 
+    # GTRasterTypeGeoKey (1025) says what the tiepoint refers to:
+    # 1 = RasterPixelIsArea, the tiepoint is the *corner* of the first
+    # cell; 2 = RasterPixelIsPoint, it is the cell *centre*. Everything
+    # downstream indexes by cell centre, so an Area raster needs half a
+    # cell added. SRTM v3 ships as Point and NASADEM as Area — reading
+    # both with one convention misplaces one of them by 15 m, which on
+    # a 40° Andean slope is about 13 m of invented elevation error.
+    if _geokey(geokeys, 1025) == 1:
+        lon_min += 0.5 * dlon
+        lat_max -= 0.5 * dlat
+
     tile = GeoTiffTile(path=path, lat_max=lat_max, lon_min=lon_min,
-                       dlat=dlat, dlon=dlon, n_rows=n_rows, n_cols=n_cols)
+                       dlat=dlat, dlon=dlon, n_rows=n_rows, n_cols=n_cols,
+                       nodata=nodata)
     return tile, array
 
 
@@ -212,7 +337,8 @@ def build_dem_from_geotiff(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
     spacing_m: float = 30.0,
-    nodata: int = -32767,
+    nodata: Optional[float] = None,
+    product: Optional[str] = None,
     out_path: str = None,
     verbose: bool = True,
 ) -> Dict:
@@ -230,8 +356,12 @@ def build_dem_from_geotiff(
         Output grid spacing. Requesting finer than the source resolution
         interpolates and buys nothing real — 1-arc-second tiles are
         ~30 m at the equator.
-    nodata : int
-        Source nodata value. SRTM uses -32767; voids are filled.
+    nodata : float, optional
+        Override the void sentinel. By default each tile's own
+        ``GDAL_NODATA`` tag is used (SRTM v3 declares -32767, NASADEM
+        -32768), falling back to -32767 for tiles that declare none.
+        Any value below ``VOID_FLOOR_M`` is treated as void regardless,
+        so a mislabelled tile cannot inject a -32768 m "mountain".
     out_path : str
         Where to write the ``.npz``. If ``None``, nothing is written and
         the arrays are returned for inspection.
@@ -279,19 +409,36 @@ def build_dem_from_geotiff(
             continue
         vals = np.full(LAT.shape, np.nan)
         vals[inside] = array[row[inside], col[inside]].astype(float)
-        vals[vals == nodata] = np.nan
+        sentinel = nodata if nodata is not None else (
+            tile.nodata if tile.nodata is not None else DEFAULT_NODATA)
+        # Two independent guards. The declared sentinel catches the exact
+        # value the producer used; the floor catches anything the tag got
+        # wrong, because no point on Earth's land surface is 1 km below
+        # the Dead Sea and a stray -32768 read as metres would carve a
+        # canyon the planner would dive straight into.
+        vals[(vals == sentinel) | (vals < VOID_FLOOR_M)] = np.nan
         take = np.isnan(elev) & ~np.isnan(vals)
         elev[take] = vals[take]
 
-    n_void = int(np.isnan(elev).sum())
-    elev = fill_voids(elev, np.isnan(elev))
+    void_mask = np.isnan(elev)
+    n_void = int(void_mask.sum())
+    elev = fill_voids(elev, void_mask)
 
     meta = {
         "source": "geotiff",
+        # Which terrain product these tiles came from. Filenames alone
+        # do not say — "output_be.tif" could be anything — and a DEM
+        # whose provenance is unrecorded cannot be cited in a paper.
+        "product": product or "unspecified",
         "tiles": [os.path.basename(t.path) for t, _ in tiles],
+        "nodata": {os.path.basename(t.path):
+                   (nodata if nodata is not None else
+                    (t.nodata if t.nodata is not None else DEFAULT_NODATA))
+                   for t, _ in tiles},
         "spacing_m": spacing_m,
         "bbox": [lat_min, lat_max, lon_min, lon_max],
         "voids_filled": n_void,
+        "void_fraction": float(n_void) / float(elev.size),
     }
     if verbose:
         print(f"  grid {len(lat_1d)} x {len(lon_1d)} at ~{spacing_m:.0f} m")
@@ -300,12 +447,12 @@ def build_dem_from_geotiff(
               f"({100*n_void/elev.size:.1f}% of cells)")
 
     if out_path:
-        save_dem(out_path, lat_1d, lon_1d, elev, meta)
+        save_dem(out_path, lat_1d, lon_1d, elev, meta, void_mask=void_mask)
         if verbose:
             print(f"  wrote {out_path}")
 
     return {"lat_1d": lat_1d, "lon_1d": lon_1d, "elev": elev,
-            "metadata": meta}
+            "void_mask": void_mask, "metadata": meta}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -360,9 +507,16 @@ class OpenTopoDataClient:
 
     # ── Cache ─────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _key(lat: float, lon: float) -> str:
-        return f"{lat:.6f},{lon:.6f}"
+    def _key(self, lat: float, lon: float) -> str:
+        """
+        Cache key for one point.
+
+        Includes the dataset name. Keying on coordinates alone means a
+        cross-check against a second source silently reads back the
+        first one's values and reports perfect agreement — which is
+        exactly the failure a cross-check exists to catch.
+        """
+        return f"{self.dataset}|{lat:.6f},{lon:.6f}"
 
     def _load_cache(self):
         try:
@@ -383,6 +537,15 @@ class OpenTopoDataClient:
         keys = np.array(list(self._cache.keys()))
         vals = np.array(list(self._cache.values()), dtype=float)
         np.savez_compressed(self.cache_path, keys=keys, values=vals)
+
+    #: Datasets the public instance serves. NASADEM is *not* among them,
+    #: which is worth knowing before planning a validation around it.
+    PUBLIC_DATASETS = ("srtm30m", "srtm90m", "aster30m", "mapzen",
+                       "eudem25m", "ned10m", "etopo1", "gebco2020")
+
+    def available_datasets(self) -> List[str]:
+        """Datasets this instance is configured with."""
+        return list(self.PUBLIC_DATASETS)
 
     # ── Quota ─────────────────────────────────────────────────────────
 
@@ -409,6 +572,7 @@ class OpenTopoDataClient:
         Cached points are served locally and never re-requested, so an
         interrupted fetch resumes where it stopped.
         """
+        import urllib.error
         import urllib.parse
         import urllib.request
 
@@ -458,6 +622,26 @@ class OpenTopoDataClient:
             try:
                 with urllib.request.urlopen(url, timeout=self.timeout_s) as resp:
                     payload = json.loads(resp.read().decode())
+            except urllib.error.HTTPError as exc:
+                # The API explains itself in the body — an unknown dataset
+                # name, a bad bounding box. Reporting only "HTTP 400" hides
+                # the one piece of information that would fix it.
+                detail = ""
+                try:
+                    detail = json.loads(exc.read().decode()).get("error", "")
+                except Exception:
+                    pass
+                self._last_call = time.time()
+                if exc.code == 400 and "not in config" in detail:
+                    raise ValueError(
+                        f"{detail} Datasets available on this instance: "
+                        f"{', '.join(self.available_datasets())}."
+                    ) from exc
+                warnings.warn(
+                    f"OpenTopoData request failed (HTTP {exc.code}"
+                    + (f": {detail}" if detail else "")
+                    + f"); {len(idx)} point(s) left unresolved.", stacklevel=2)
+                continue
             except Exception as exc:
                 warnings.warn(
                     f"OpenTopoData request failed ({exc}); "
@@ -617,3 +801,108 @@ def corridor_bbox(waypoints: Sequence[Tuple[float, float]],
                            * max(math.cos(math.radians(mid_lat)), 1e-6))
     return (min(lats) - dlat, max(lats) + dlat,
             min(lons) - dlon, max(lons) + dlon)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CROSS-CHECK
+# ═══════════════════════════════════════════════════════════════════════════
+
+def cross_check_corridor(
+    dem,
+    waypoints: Sequence[Tuple[float, float]],
+    n_samples: int = 200,
+    dataset: str = "aster30m",
+    api_url: str = PUBLIC_API,
+    cache_path: str = None,
+    verbose: bool = True,
+    **client_kwargs,
+) -> Dict:
+    """
+    Compare a local DEM against an independent source along one route.
+
+    Cheap by design: 200 points is two API calls, so the public quota is
+    irrelevant. That is enough to detect the failures that matter — a
+    vertical datum offset, a mis-registered tile, or a systematic bias
+    from void filling — none of which a self-consistent mosaic can reveal
+    on its own.
+
+    ``aster30m`` is the default because it is genuinely independent:
+    ASTER is optical stereo where SRTM is radar, so the two fail in
+    different places and agreement between them means something.
+    ``srtm30m`` compares against the same source as most local tiles — it
+    cannot reveal a shared bias, but it does catch tile mis-registration
+    and datum errors, and it should agree to within a metre.
+
+    NASADEM would be the ideal reference — the same radar reprocessed
+    with voids filled at source — but the public OpenTopoData instance
+    does not serve it. Self-host to use it.
+
+    Expect a metre or two of scatter against a same-source reference and
+    ten or more against an independent one: ASTER's own vertical accuracy
+    is around ±17 m, so a difference of that order says more about ASTER
+    than about the local mosaic. The verdict below accounts for that.
+
+    Returns
+    -------
+    dict of difference statistics (local minus reference) and a verdict.
+    """
+    import urllib.error  # noqa: F401  (surfaced by the client's error path)
+    dists, lats, lons = [], [], []
+    total = 0.0
+    for a, b in zip(waypoints[:-1], waypoints[1:]):
+        seg = int(max(n_samples / max(len(waypoints) - 1, 1), 2))
+        for f in np.linspace(0, 1, seg, endpoint=False):
+            lats.append(a[0] + f * (b[0] - a[0]))
+            lons.append(a[1] + f * (b[1] - a[1]))
+    lats.append(waypoints[-1][0])
+    lons.append(waypoints[-1][1])
+    lats, lons = np.array(lats), np.array(lons)
+
+    local = np.asarray(dem.elevation_batch(lats, lons), dtype=float)
+
+    client = OpenTopoDataClient(api_url=api_url, dataset=dataset,
+                                cache_path=cache_path, **client_kwargs)
+    if verbose:
+        est = client.estimate(len(lats))
+        print(f"  cross-checking {len(lats)} points against {dataset}: "
+              f"{est['calls']} call(s)")
+    reference = client.elevations(lats, lons, verbose=False)
+
+    good = ~(np.isnan(local) | np.isnan(reference))
+    if good.sum() < 10:
+        return {"available": False,
+                "note": "too few overlapping samples to compare"}
+
+    diff = local[good] - reference[good]
+    bias = float(np.mean(diff))
+    spread = float(np.std(diff))
+    worst = float(np.max(np.abs(diff)))
+
+    # A metre or two of scatter between products is normal. A consistent
+    # offset is not — it points at a datum or registration problem, and
+    # it shifts every clearance number by the same amount.
+    # An independent optical product legitimately differs from radar by
+    # more than a same-source one does. Judging both against the same
+    # threshold reports a healthy cross-check as a fault.
+    independent = not dataset.startswith("srtm")
+    bias_limit = 20.0 if independent else 3.0
+    spread_limit = 30.0 if independent else 10.0
+
+    verdict = "consistent"
+    if abs(bias) > bias_limit:
+        verdict = "systematic offset — check the vertical datum"
+    elif spread > spread_limit:
+        verdict = "large scatter — check tile registration or void filling"
+
+    return {
+        "available": True,
+        "dataset": dataset,
+        "n_compared": int(good.sum()),
+        "bias_m": bias,
+        "std_m": spread,
+        "max_abs_m": worst,
+        "verdict": verdict,
+        "independent_source": independent,
+        "note": (f"local minus {dataset}: bias {bias:+.1f} m, "
+                 f"scatter {spread:.1f} m, worst {worst:.0f} m — {verdict}"),
+    }

@@ -30,6 +30,8 @@ necesaria para cada fase de vuelo" in the energy_modeling document.
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict
+import warnings
+
 import numpy as np
 
 from .atmosphere import isa_density
@@ -70,12 +72,12 @@ def power_vertical_ascent(ac: AircraftEnergyParams,
     # Writing +V_y/2 instead — which is the correct form for *descent* —
     # overstates ascent induced power by 18 % at 3 m/s on this airframe,
     # and take-off is where a VTOL spends its worst power.
-    v_h_sq = T / (2 * rho * ac.A_rotor)
+    v_h_sq = T / (2 * rho * ac.rotor_area_total)
     v_i = -V_y / 2 + np.sqrt((V_y / 2)**2 + v_h_sq)
     P_i = ac.k_i * T * v_i
 
     # Profile power (blade drag)
-    P_o = rho * ac.A_rotor * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
+    P_o = rho * ac.rotor_area_total * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
 
     return P_c + P_i + P_o
 
@@ -95,10 +97,10 @@ def power_hover(ac: AircraftEnergyParams,
     T = ac.W
 
     # Ideal induced power + correction
-    P_i = ac.k_i * T * np.sqrt(T / (2 * rho * ac.A_rotor))
+    P_i = ac.k_i * T * np.sqrt(T / (2 * rho * ac.rotor_area_total))
 
     # Profile power
-    P_o = rho * ac.A_rotor * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
+    P_o = rho * ac.rotor_area_total * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
 
     return P_i + P_o
 
@@ -126,13 +128,13 @@ def power_transition(ac: AircraftEnergyParams,
 
     # Induced power
     # Using momentum theory in forward flight
-    v_h2 = T / (2 * rho * ac.A_rotor)
+    v_h2 = T / (2 * rho * ac.rotor_area_total)
     v_term = np.sqrt((-V_inf**2 / 2)**2 + v_h2**2)
     v_i = np.sqrt(-V_inf**2 / 2 + v_term)
     P_i = ac.k_i * T * v_i
 
     # Profile power (increases with advance ratio)
-    P_o = rho * ac.A_rotor * ac.V_tip**3 * \
+    P_o = rho * ac.rotor_area_total * ac.V_tip**3 * \
           (ac.sigma_rotor * ac.C_d_blade / 8) * (1 + 4.6 * mu**2)
 
     # Parasitic power. C_D0, not the full cruise drag polar: during
@@ -282,12 +284,12 @@ def power_vertical_descent(ac: AircraftEnergyParams,
     # Same momentum-theory expression as the climb, with the sign the
     # other way round: descending, the rotor re-ingests its own wake and
     # the induced velocity *rises*.
-    v_h_sq = T / (2 * rho * ac.A_rotor)
+    v_h_sq = T / (2 * rho * ac.rotor_area_total)
     v_i = V_y_abs / 2 + np.sqrt((V_y_abs / 2)**2 + v_h_sq)
     P_i = ac.k_i * T * v_i
 
     # Profile power
-    P_o = rho * ac.A_rotor * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
+    P_o = rho * ac.rotor_area_total * ac.V_tip**3 * (ac.sigma_rotor * ac.C_d_blade / 8)
 
     # Gravity does part of the work, so the rotor supplies less.
     P_net = P_i + P_o - T * V_y_abs
@@ -298,6 +300,74 @@ def power_vertical_descent(ac: AircraftEnergyParams,
 # ═════════════════════════════════════════════════════════════════════════════
 # SEGMENT → POWER MAPPING
 # ═════════════════════════════════════════════════════════════════════════════
+
+def vortex_ring_margin(ac: AircraftEnergyParams, V_descent: float,
+                       altitude: float) -> dict:
+    """
+    How close a vertical descent is to the vortex-ring state.
+
+    Between roughly 0.25 and 1.5 times the hover induced velocity, a
+    descending rotor re-ingests its own wake. Momentum theory does not
+    merely lose accuracy there — it inverts: real power *rises* while the
+    model says it falls, and the rotor can lose thrust entirely. It is a
+    genuine loss-of-control mechanism, not a modelling nicety.
+
+    :func:`power_vertical_descent` is momentum theory, so it is only
+    valid *below* that band. This reports where a given descent rate sits.
+
+    Returns
+    -------
+    dict with the ratio ``V_descent / v_h``, the band edges, and whether
+    the descent is safe, marginal or inside the vortex-ring region.
+    """
+    rho = isa_density(altitude)
+    v_h = float(np.sqrt(ac.W / (2 * rho * ac.rotor_area_total)))
+    ratio = abs(float(V_descent)) / max(v_h, 1e-9)
+
+    if ratio < 0.25:
+        state = "safe"
+    elif ratio <= 1.5:
+        state = "VORTEX RING — power model invalid, thrust may collapse"
+    else:
+        state = "windmill brake — beyond the vortex-ring band"
+
+    return {
+        "descent_rate": abs(float(V_descent)),
+        "hover_induced_velocity": v_h,
+        "ratio": ratio,
+        "vrs_lower": 0.25 * v_h,
+        "vrs_upper": 1.5 * v_h,
+        "state": state,
+        "safe": ratio < 0.25,
+        # How much faster the aircraft could descend before entering the
+        # band — the number a planner actually needs.
+        "margin_ms": max(0.25 * v_h - abs(float(V_descent)), 0.0),
+    }
+
+
+def check_descent_rates(path, ac: AircraftEnergyParams) -> list:
+    """
+    Report any VTOL descent on a path that enters the vortex-ring band.
+
+    Cheap to run and worth running: descent rates are design variables,
+    and nothing else in the package stops the optimizer choosing one that
+    is aerodynamically dangerous but energetically attractive.
+    """
+    out = []
+    for i, seg in enumerate(path.segments):
+        if seg.segment_type.value != "VTOL_DESCEND":
+            continue
+        k = seg.kinematics
+        s, e = seg.start_state, seg.end_state
+        m = vortex_ring_margin(ac, k.vertical_speed, 0.5 * (s.alt + e.alt))
+        if not m["safe"]:
+            out.append(
+                f"segment {i}: descending at {m['descent_rate']:.1f} m/s, "
+                f"{m['ratio']:.2f}x hover induced velocity — {m['state']}. "
+                f"Stay below {m['vrs_lower']:.1f} m/s."
+            )
+    return out
+
 
 def compute_segment_power(ac: AircraftEnergyParams,
                           segment_type: str,
@@ -524,27 +594,89 @@ class BatteryModel:
         self.timeline.clear()
         self._record_state(0.0, 0.0)
 
-    #: Per-cell open-circuit voltage against state of charge for a LiPo.
-    #: Tabulated rather than fitted so it can be replaced wholesale for a
-    #: different chemistry — Li-ion NMC and LiFePO4 have quite different
-    #: shapes, and the plateau is what decides how much of the pack is
-    #: actually reachable above the cut-off.
-    OCV_SOC = np.array([0.00, 0.05, 0.10, 0.20, 0.40, 0.60, 0.80, 0.95, 1.00])
-    OCV_CELL_V = np.array([3.30, 3.45, 3.55, 3.65, 3.75, 3.85, 4.00, 4.15, 4.20])
-
     @property
     def ocv(self) -> float:
         """
         Open-circuit pack voltage at the present SOC [V].
 
-        The previous model was ``V_nom × (0.85 + 0.15·SOC)``, which tops
-        out at the *nominal* 22.2 V for a 6S pack that actually leaves
-        the ground at 25.2 V and is empty near 19.8 V. Currents inferred
-        from it were therefore high at full charge and low when empty —
+        Three sources, in order of preference: a curve fitted from a
+        measured discharge log, the published curve for the pack's
+        chemistry, and — only if the chemistry is unrecognised — the
+        generic LiPo table, with a warning.
+
+        The model this replaced was ``V_nom × (0.85 + 0.15·SOC)``, which
+        tops out at the *nominal* 22.2 V for a 6S pack that actually
+        leaves the ground at 25.2 V and is empty near 19.8 V. Currents
+        inferred from it were high at full charge and low when empty —
         exactly backwards.
         """
-        cell = float(np.interp(self.SOC, self.OCV_SOC, self.OCV_CELL_V))
+        soc = self.charge_fraction
+        fit = getattr(self.ac, 'battery_fit', None)
+        if fit is not None:
+            cell = float(np.interp(soc, fit.ocv_soc, fit.ocv_cell_v))
+        else:
+            soc_grid, v_grid = self._chemistry_curve()
+            cell = float(np.interp(soc, soc_grid, v_grid))
         return cell * self.ac.battery_cells_series
+
+    @property
+    def charge_fraction(self) -> float:
+        """
+        Fraction of the pack's *total* charge still in it [0, 1].
+
+        Not the same as :attr:`SOC`, and the difference matters. ``SOC``
+        runs from 1 at full to 0 when the **usable** energy is gone —
+        that is what the mission planner reasons about, and what the
+        reserve is expressed against. The OCV curve, though, is a
+        property of the cell across its whole range, and looking it up
+        at the mission SOC puts the pack at a fully flat 2.5 V/cell at
+        the moment the reserve is reached, which is a voltage no flight
+        ever sees.
+
+        With a usable fraction ``f``, exhausting the usable energy still
+        leaves ``1 − f`` of the pack, so the charge fraction is
+        ``1 − (1 − SOC)·f``.
+        """
+        f = float(np.clip(self.ac.battery_usable_fraction, 0.0, 1.0))
+        return float(np.clip(1.0 - (1.0 - self.SOC) * f, 0.0, 1.0))
+
+    def _chemistry_curve(self):
+        """The pack's OCV table, cached after the first lookup."""
+        cached = getattr(self, '_ocv_table', None)
+        if cached is not None:
+            return cached
+        from .battery import cell_ocv_curve
+        chem = getattr(self.ac, 'cell_chemistry', 'li-ion')
+        try:
+            table = cell_ocv_curve(chem)
+        except KeyError:
+            warnings.warn(
+                f"unknown cell chemistry {chem!r}; falling back to the "
+                f"generic LiPo curve, which is the wrong shape for any "
+                f"Li-ion pack. Set cell_chemistry to one of the known "
+                f"values.",
+                stacklevel=3,
+            )
+            table = cell_ocv_curve('lipo')
+        self._ocv_table = table
+        return table
+
+    @property
+    def internal_resistance(self) -> float:
+        """
+        Pack internal resistance at the present SOC [ohm].
+
+        Nominal resistance scaled by the SOC dependence measured in
+        Chen & Rincón-Mora (2006): nearly flat above 20 % and climbing
+        steeply below it, roughly threefold by empty. A constant
+        resistance understates voltage sag exactly where a mission has
+        least margin, which is at the end of it — and voltage sag is
+        what turns "enough energy left" into "cannot supply the hover
+        power to land".
+        """
+        from .battery import chen_rincon_mora_resistance_factor
+        R = self.ac.battery_resistance
+        return float(R * chen_rincon_mora_resistance_factor(self.charge_fraction))
 
     @property
     def voltage(self) -> float:
@@ -561,7 +693,7 @@ class BatteryModel:
         demand is simply unmeetable, which is a different failure from
         running out of energy and worth reporting as such.
         """
-        R = self.ac.battery_resistance
+        R = self.internal_resistance
         if R <= 0:
             return float('inf')
         return self.ocv ** 2 / (4.0 * R)
@@ -608,7 +740,7 @@ class BatteryModel:
         SOC_start = self.SOC
         dt_h = duration_s / 3600.0
         V_oc = self.ocv
-        R = self.ac.battery_resistance
+        R = self.internal_resistance
         power_w = max(float(power_w), 0.0)
 
         limited = False

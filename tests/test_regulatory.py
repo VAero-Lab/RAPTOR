@@ -29,7 +29,7 @@ from raptor.regulations import (
 from raptor.routed_path import RoutedPath
 from raptor.terrain import TerrainAnalyzer
 
-DEM_PATH = "data/dmq_dem.npz"
+DEM_PATH = "data/dmq_dem_30m.npz"
 pytestmark = pytest.mark.skipif(
     not os.path.exists(DEM_PATH), reason="bundled DMQ DEM not available"
 )
@@ -243,7 +243,51 @@ def test_terrain_following_holds_the_target_height(dem, uav, con):
         max_agl=con.max_agl,
     )
     assert prof.agl.min() >= 90.0 - 1e-6, "never below the target"
-    assert prof.n_breakpoints <= 12, "profile must stay cheap to fly"
+    assert prof.n_breakpoints <= 32, "profile must stay cheap to fly"
+
+
+def test_flown_profile_never_dips_below_the_reference(dem, uav, con):
+    """
+    The breakpoint polyline is what the aircraft flies; the dense
+    envelope is only what it was simplified from. A chord that cuts
+    below the envelope flies lower than the corridor floor allows, and
+    for a while the profile reported that as clean because the report
+    was computed from the envelope rather than from the chord.
+    """
+    for a, b in [((-0.2000, -78.4930), (-0.3242, -78.5493)),
+                 ((-0.2528, -78.5203), (-0.1440, -78.4230)),
+                 ((-0.2100, -78.5100), (-0.2600, -78.6200))]:
+        prof = build_corridor_profile(
+            dem, a, b, target_agl=90.0,
+            max_climb_angle_deg=uav.fw_max_climb_angle,
+            max_descent_angle_deg=uav.fw_max_descent_angle,
+            max_agl=con.max_agl,
+        )
+        dip = float(np.max(prof.envelope_altitudes - prof.sample_altitudes))
+        assert dip <= 0.5, f"flown profile dips {dip:.1f} m below the envelope"
+        assert prof.agl.min() >= 90.0 - 1e-6
+
+
+def test_ceiling_excess_is_measured_on_the_flown_profile(dem, uav, con):
+    """
+    Simplification lifts the profile to preserve clearance, and that
+    lift eats ceiling headroom. Reporting the envelope's exceedance
+    instead of the flown one hides exactly the cost that was just
+    incurred.
+    """
+    prof = build_corridor_profile(
+        dem, (-0.2000, -78.4930), (-0.3242, -78.5493), target_agl=90.0,
+        max_climb_angle_deg=uav.fw_max_climb_angle,
+        max_descent_angle_deg=uav.fw_max_descent_angle,
+        max_agl=con.max_agl, max_breakpoints=6, simplify_tol_m=20.0,
+    )
+    flown_excess = float(np.max(np.maximum(prof.agl - con.max_agl, 0.0)))
+    assert prof.ceiling_excess_m == pytest.approx(flown_excess, abs=1e-6)
+    # Starved of breakpoints, the flown profile must be worse than the
+    # envelope — if these agree, the report is reading the wrong array.
+    env_excess = float(np.max(np.maximum(
+        prof.envelope_altitudes - prof.sample_terrain - con.max_agl, 0.0)))
+    assert prof.ceiling_excess_m > env_excess
 
 
 # ── Path construction ─────────────────────────────────────────────────────
@@ -277,3 +321,276 @@ def test_vectorised_containment_matches_scalar(dem):
         slow = np.array([zone.geometry.contains_point(a, b)
                          for a, b in zip(lats, lons)])
         assert np.array_equal(fast, slow), zone.zone_id
+
+
+# ── Public API ────────────────────────────────────────────────────────────
+
+def test_everything_in_all_is_importable():
+    """
+    A name in ``__all__`` that is not actually exported turns every README
+    snippet using it into a broken example — which is how the docs came to
+    document an import of MissionPlanner that failed.
+    """
+    import raptor
+    missing = [n for n in raptor.__all__ if not hasattr(raptor, n)]
+    assert missing == []
+
+
+def test_readme_python_blocks_reference_real_api():
+    """
+    Parse every python block in the README and check the names it imports
+    from raptor exist. Cheap, and it catches documentation drifting away
+    from the package.
+    """
+    import ast
+    import os
+    import re
+
+    if not os.path.exists("README.md"):
+        pytest.skip("README not present")
+
+    blocks = re.findall(r"```python\n(.*?)```", open("README.md").read(), re.S)
+    assert blocks, "README should contain python examples"
+
+    missing = []
+    for block in blocks:
+        tree = ast.parse(block)          # also asserts the snippet parses
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if not (node.module or "").startswith("raptor"):
+                continue
+            mod = __import__(node.module, fromlist=["x"])
+            for alias in node.names:
+                if alias.name != "*" and not hasattr(mod, alias.name):
+                    missing.append(f"{node.module}.{alias.name}")
+
+    assert missing == [], f"README references names that do not exist: {missing}"
+
+
+def test_airspace_feasible_is_not_the_whole_verdict(dem, uav, con):
+    """
+    `AirspaceReport.feasible` knows nothing about terrain clearance.
+    Reading it alone as "is this route legal" prints LEGAL for a path
+    that flies into a hill — which is how a report came to contradict
+    itself two lines apart.
+    """
+    from raptor.airspace import AirspaceManager
+    from raptor.path import FlightPath
+    from raptor.segments import FWCruise
+    from raptor.terrain import TerrainAnalyzer
+
+    a = (-0.2641, -78.5504)
+    ground = float(dem.elevation(*a))
+
+    # Straight and level at pad height across rising ground.
+    fp = FlightPath(a[0], a[1], ground, -0.2358, -78.5886, ground)
+    fp.add_segment(FWCruise(ground_distance=4000.0, airspeed=30.0))
+
+    empty = AirspaceManager([], dem=dem)
+    report = empty.check_path(fp)
+    terrain = TerrainAnalyzer(dem, con).analyze(fp)
+
+    assert report.feasible            # no zones, so airspace is clear
+    assert not terrain.is_feasible    # but it is flying into the terrain
+
+
+def test_facility_elevations_are_checked_against_the_terrain(dem):
+    """
+    Pad elevations are typed in by hand and nothing forces them to agree
+    with the DEM. When they disagree the departure and arrival phases are
+    built against the wrong ground — CS.Conocoto carried a 23 m error,
+    a fifth of the whole legal corridor.
+    """
+    from raptor.builder import FacilityNode, check_facility_elevations
+
+    lat, lon = -0.3080, -78.4710
+    truth = float(dem.elevation(lat, lon))
+
+    good = FacilityNode("right", lat, lon, truth)
+    assert check_facility_elevations([good], dem) == []
+
+    wrong = FacilityNode("CS.Conocoto", lat, lon, truth + 23.0)
+    findings = check_facility_elevations([wrong], dem)
+    assert findings and "CS.Conocoto" in findings[0]
+    assert "+23" in findings[0]
+
+
+def test_elevation_check_reports_worst_first(dem):
+    from raptor.builder import FacilityNode, check_facility_elevations
+    lat, lon = -0.2000, -78.4930
+    truth = float(dem.elevation(lat, lon))
+    findings = check_facility_elevations([
+        FacilityNode("small", lat, lon, truth + 15.0),
+        FacilityNode("large", lat, lon, truth + 60.0),
+    ], dem)
+    assert findings[0].startswith("large")
+
+
+def test_catalogue_takes_elevations_from_the_terrain(dem):
+    """
+    The elevations typed into scenarios.py are mostly wrong — thirteen of
+    fifteen disagree with the DEM by more than 10 m, one by 499 m — and
+    departure and arrival are built from them. `update_facility_elevations`
+    existed but nothing called it, so the catalogue always used the typed
+    values.
+    """
+    from raptor.builder import check_facility_elevations
+    from raptor.scenarios import ALL_FACILITIES, build_scenario_catalog
+
+    build_scenario_catalog(dem)          # must correct them
+    assert check_facility_elevations(ALL_FACILITIES, dem, tolerance_m=1.0) == []
+
+
+def test_update_reports_what_it_moved(dem):
+    from raptor.scenarios import ALL_FACILITIES, update_facility_elevations
+    ALL_FACILITIES[0].ground_elev = 1.0          # deliberately absurd
+    changed = update_facility_elevations(dem)
+    assert any(name == ALL_FACILITIES[0].name for name, _, _ in changed)
+    assert ALL_FACILITIES[0].ground_elev > 1000.0
+
+
+def test_documented_commands_name_modules_that_exist():
+    """
+    Every ``python -m scripts.X`` or ``python -m examples.X`` in the
+    README or the docs must name a module that is actually there.
+
+    Cheap, and it catches the specific way documentation rots: a script
+    is renamed or deleted and the command that invoked it lives on,
+    looking authoritative.
+    """
+    import glob
+    import os
+    import re
+
+    docs = ["README.md"] + sorted(glob.glob("docs/*.md")) + ["CHANGELOG.md"]
+    docs = [d for d in docs if os.path.exists(d)]
+    assert docs, "no documentation found"
+
+    missing = []
+    for doc in docs:
+        text = open(doc, encoding="utf-8").read()
+        for mod in re.findall(r"python -m ((?:scripts|examples)\.[\w.]+)", text):
+            path = mod.replace(".", "/") + ".py"
+            if not os.path.exists(path):
+                missing.append(f"{doc}: {mod} -> {path}")
+    assert missing == [], "documented commands with no module:\n" + "\n".join(missing)
+
+
+def test_documented_figures_are_ones_make_figures_can_produce():
+    """
+    Figure filenames quoted in the docs have to be ones the figure
+    script actually writes, and ``--only`` names have to be real keys.
+    """
+    import glob
+    import os
+    import re
+
+    from scripts.make_figures import FIGURES
+
+    docs = ["README.md"] + sorted(glob.glob("docs/*.md"))
+    docs = [d for d in docs if os.path.exists(d)]
+
+    source = open("scripts/make_figures.py", encoding="utf-8").read()
+    produced = set(re.findall(r'save\(fig, out, "([^"]+)"', source))
+
+    bad_files, bad_keys = [], []
+    for doc in docs:
+        text = open(doc, encoding="utf-8").read()
+        for name in re.findall(r"figures/current/([\w./-]+\.png)", text):
+            if name not in produced:
+                bad_files.append(f"{doc}: {name}")
+        for run in re.findall(r"make_figures[^\n]*--only ([\w ]+)", text):
+            for key in run.split():
+                if key not in FIGURES:
+                    bad_keys.append(f"{doc}: --only {key}")
+
+    assert bad_files == [], "figures named in docs that nothing produces:\n" \
+        + "\n".join(bad_files)
+    assert bad_keys == [], "unknown --only keys in docs:\n" + "\n".join(bad_keys)
+
+
+# ── Scope of a compliance verdict ─────────────────────────────────────────
+
+def test_a_verdict_declares_the_rules_it_did_not_test():
+    """
+    ``min_separation_persons_m``, ``min_separation_buildings_m`` and
+    ``min_visibility_m`` sat in the regulatory profile, read by nothing,
+    for the life of the package. They cannot be checked — doing so needs
+    building footprints, crowd positions and a weather feed, none of
+    which RAPTOR has.
+
+    An unenforceable rule silently absent from a report is
+    indistinguishable from a rule that passed. So the profile now names
+    them and the assessment carries them, which turns a limitation into
+    a declared one: "compliant" from this package means compliant with
+    the rules it can see.
+    """
+    from raptor.regulations import RDAC_101
+
+    rules = RDAC_101.unenforceable_rules()
+    assert rules
+    joined = " ".join(rules)
+    assert "101.160" in joined and "101.215" in joined
+    assert "not modelled" in joined
+
+
+def test_the_unchecked_rules_reach_the_printed_report(dem):
+    from raptor.airspace import build_airspace
+    from raptor.compliance import assess_compliance
+    from raptor.config import MissionConstraints, UAVConfig
+    from raptor.builder import FacilityNode
+    from raptor.routed_path import RoutedPath
+    from raptor.terrain import TerrainAnalyzer
+    from raptor.vehicles import get_vehicle
+
+    con = MissionConstraints()
+    ac = get_vehicle("va23").build_aero(verbose=False)
+    uav = UAVConfig.for_vehicle(ac.with_payload(1.5), altitude=2800.0)
+    a, b = (-0.2000, -78.4930), (-0.1273, -78.4977)
+    o = FacilityNode("O", a[0], a[1], dem.elevation(*a))
+    d = FacilityNode("D", b[0], b[1], dem.elevation(*b))
+    fp = RoutedPath(o, d, dem, uav, con, n_intermediate=1,
+                    corridor_mode="agl").flight_path
+
+    assessment = assess_compliance(
+        fp, TerrainAnalyzer(dem, con).analyze(fp),
+        build_airspace(dem=dem).check_path(fp), constraints=con)
+
+    # And the mistake that led here must not be silent.
+    with pytest.raises(TypeError, match="RegulatoryProfile"):
+        assess_compliance(fp, TerrainAnalyzer(dem, con).analyze(fp),
+                          build_airspace(dem=dem).check_path(fp), con)
+
+    assert assessment.unchecked_rules
+    report = assessment.filing_summary()
+    assert "did NOT test" in report
+    assert "101.160" in report
+
+
+def test_range_limit_is_enforced_not_merely_declared():
+    """
+    ``MissionConstraints.max_range`` was declared, documented and read by
+    nothing, so a route could be twice the aircraft's stated range with
+    no part of the model saying so.
+    """
+    from raptor.config import MissionConstraints, UAVConfig
+    from raptor.path import FlightPath
+    from raptor.segments import FWCruise
+    from raptor.terrain import check_path_envelope
+    from raptor.vehicles import get_vehicle
+
+    ac = get_vehicle("va23").build_aero(verbose=False)
+    uav = UAVConfig.for_vehicle(ac, altitude=2800.0)
+
+    path = FlightPath(-0.20, -78.49, 2800.0, -0.21, -78.50, 2800.0)
+    for _ in range(4):
+        path.add_segment(FWCruise(ground_distance=10_000.0,
+                                  airspeed=uav.fw_cruise_airspeed))
+
+    within = MissionConstraints(max_range=60_000.0)
+    beyond = MissionConstraints(max_range=25_000.0)
+    assert not any("range limit" in p
+                   for p in check_path_envelope(path, uav, within))
+    assert any("range limit" in p
+               for p in check_path_envelope(path, uav, beyond))

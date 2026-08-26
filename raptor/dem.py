@@ -12,10 +12,12 @@ Designed to work with the DMQ SRTM data produced by the
 DEM preparation script.
 """
 
+import json
+
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from typing import Tuple, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -32,6 +34,23 @@ class DEMMetadata:
     elev_min: float
     elev_max: float
     elev_mean: float
+    source: dict = field(default_factory=dict)
+    """Provenance recorded when the DEM was built: which product, which
+    tiles, how many voids were filled. Written by ``save_dem`` and until
+    now read by nothing — a DEM whose origin cannot be recovered cannot
+    be cited in a paper or reproduced by a reader."""
+
+    def provenance(self) -> str:
+        """One line naming where this terrain came from."""
+        src = self.source or {}
+        product = src.get("product") or src.get("source") or "unknown source"
+        voids = src.get("voids_filled")
+        cell = f"{min(self.dlat_m, self.dlon_m):.0f} m"
+        parts = [product, f"{self.n_lat}x{self.n_lon} at ~{cell}"]
+        if voids is not None:
+            parts.append("void-free" if voids == 0
+                         else f"{voids} cells interpolated")
+        return "; ".join(parts)
 
 
 class DEMInterface:
@@ -75,15 +94,44 @@ class DEMInterface:
         self._lat_grid = data['lat_grid'] if 'lat_grid' in data else None
         self._lon_grid = data['lon_grid'] if 'lon_grid' in data else None
 
+        # Cells filled by interpolation rather than measured. Stored
+        # bit-packed because it is one bit per cell over millions of them.
+        self.void_mask = None
+        if 'void_mask' in data and 'void_shape' in data:
+            shape = tuple(int(x) for x in data['void_shape'])
+            bits = np.unpackbits(data['void_mask'])[:int(np.prod(shape))]
+            self.void_mask = bits.astype(bool).reshape(shape)
+
+        self.metadata_json = {}
+        if 'metadata' in data:
+            try:
+                self.metadata_json = json.loads(str(data['metadata']))
+            except Exception:
+                self.metadata_json = {}
+
         # Optional derived fields
-        self.slope_deg = data.get('slope_deg', None)
-        self.hillshade = data.get('hillshade', None)
+        self.slope_deg = data['slope_deg'] if 'slope_deg' in data else None
+        self.hillshade = data['hillshade'] if 'hillshade' in data else None
 
         # Build interpolator for fast queries
-        # Ensure lat is ascending (should be from linspace)
+        # Ensure lat is ascending (should be from linspace).
+        # Everything keyed by row has to flip together: a void mask left
+        # in the old order would mark the wrong cells as interpolated,
+        # and a void report is only useful if it points at the right
+        # ground.
         if self.lat_1d[0] > self.lat_1d[-1]:
             self.lat_1d = self.lat_1d[::-1]
             self.elev_grid = self.elev_grid[::-1]
+            if self.void_mask is not None:
+                self.void_mask = self.void_mask[::-1]
+            if self.slope_deg is not None:
+                self.slope_deg = self.slope_deg[::-1]
+            if self.hillshade is not None:
+                self.hillshade = self.hillshade[::-1]
+            if self._lat_grid is not None:
+                self._lat_grid = self._lat_grid[::-1]
+            if self._lon_grid is not None:
+                self._lon_grid = self._lon_grid[::-1]
 
         self._interpolator = RegularGridInterpolator(
             (self.lat_1d, self.lon_1d),
@@ -96,12 +144,9 @@ class DEMInterface:
         # Build slope interpolator if available
         self._slope_interpolator = None
         if self.slope_deg is not None:
-            slope_data = self.slope_deg
-            if self._lat_grid is not None and self.lat_1d[0] > self._lat_grid[0, 0]:
-                slope_data = slope_data[::-1]
             self._slope_interpolator = RegularGridInterpolator(
                 (self.lat_1d, self.lon_1d),
-                slope_data,
+                self.slope_deg,
                 method='linear',
                 bounds_error=False,
                 fill_value=np.nan
@@ -123,6 +168,56 @@ class DEMInterface:
             elev_min=float(np.nanmin(self.elev_grid)),
             elev_max=float(np.nanmax(self.elev_grid)),
             elev_mean=float(np.nanmean(self.elev_grid)),
+            source=dict(self.metadata_json),
+        )
+
+    @classmethod
+    def from_arrays(cls, lat_1d, lon_1d, elev_grid, metadata=None,
+                    void_mask=None) -> "DEMInterface":
+        """
+        Build a DEM from arrays already in memory, without a file.
+
+        Used for decimation studies (how much does grid spacing change
+        the answer?) and for synthetic terrain in tests, both of which
+        otherwise have to round-trip through a temporary ``.npz``.
+        """
+        import io
+        from .dem_build import save_dem
+
+        buf = io.BytesIO()
+        save_dem_kwargs = dict(metadata=metadata or {})
+        if void_mask is not None:
+            save_dem_kwargs["void_mask"] = void_mask
+        # save_dem also derives the slope grid, so going through it keeps
+        # an in-memory DEM identical to one loaded from disk rather than
+        # subtly missing a field.
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as td:
+            path = _os.path.join(td, "dem.npz")
+            save_dem(path, np.asarray(lat_1d, float), np.asarray(lon_1d, float),
+                     np.asarray(elev_grid, float), **save_dem_kwargs)
+            return cls(path)
+
+    def decimated(self, factor: int) -> "DEMInterface":
+        """
+        The same terrain on a grid *factor* times coarser.
+
+        Answers "how much of this result is the terrain and how much is
+        the resolution?" without needing a second data product: the
+        coarse grid is this one subsampled, so the two differ in spacing
+        and nothing else.
+        """
+        if factor < 1:
+            raise ValueError(f"decimation factor must be >= 1, got {factor}")
+        if factor == 1:
+            return self
+        meta = dict(self.metadata_json)
+        meta["decimated_by"] = factor
+        meta["product"] = (meta.get("product", "unknown")
+                           + f" decimated {factor}x")
+        return DEMInterface.from_arrays(
+            self.lat_1d[::factor], self.lon_1d[::factor],
+            self.elev_grid[::factor, ::factor], metadata=meta,
         )
 
     # ── Point queries ────────────────────────────────────────────────────
@@ -362,3 +457,67 @@ def find_dem(candidates=None, search_dirs=None, verbose: bool = False) -> str:
         "  python -m scripts.build_dem corridor --from LAT LON --to LAT LON "
         "--out data/corridor.npz"
     )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# DATA QUALITY
+# ═════════════════════════════════════════════════════════════════════════════
+
+def void_report(dem, waypoints=None, half_width_m: float = 1000.0) -> dict:
+    """
+    How much of a DEM — or of one corridor through it — is invented.
+
+    SRTM returns no signal from steep slopes and open water, and the
+    holes are filled by interpolating neighbours. That is the right thing
+    to do, but it means some of the terrain a planner clears was never
+    measured, and over the Andes the voids cluster on exactly the steep
+    ground that threatens a low corridor.
+
+    Parameters
+    ----------
+    dem : DEMInterface
+    waypoints : list of (lat, lon), optional
+        Restrict the report to a swath along this route.
+    half_width_m : float
+        Swath half-width when ``waypoints`` is given.
+
+    Returns
+    -------
+    dict with the void fraction overall and, if a route was given, along
+    it — plus a verdict on whether it is worth worrying about.
+    """
+    if getattr(dem, "void_mask", None) is None:
+        return {"available": False,
+                "note": "This DEM carries no void record. Rebuild it with "
+                        "scripts/build_dem.py to capture one."}
+
+    mask = dem.void_mask
+    out = {
+        "available": True,
+        "total_cells": int(mask.size),
+        "void_cells": int(mask.sum()),
+        "void_fraction": float(mask.mean()),
+    }
+
+    if waypoints:
+        from .dem_build import route_mask
+        lon_grid, lat_grid = np.meshgrid(dem.lon_1d, dem.lat_1d)
+        swath = route_mask(lat_grid, lon_grid, waypoints, half_width_m)
+        n = int(swath.sum())
+        v = int((swath & mask).sum())
+        out.update({
+            "corridor_cells": n,
+            "corridor_void_cells": v,
+            "corridor_void_fraction": float(v / n) if n else 0.0,
+        })
+        frac = out["corridor_void_fraction"]
+    else:
+        frac = out["void_fraction"]
+
+    out["concerning"] = frac > 0.10
+    out["note"] = (
+        f"{frac*100:.1f}% of the terrain here was interpolated, not measured."
+        + (" That is enough to matter for clearance; consider a void-filled "
+           "product such as NASADEM or SRTM v3." if frac > 0.10 else "")
+    )
+    return out

@@ -126,6 +126,19 @@ def main(argv=None) -> int:
         for n in notes:
             print(f"  - {n}")
 
+    # ── 2b. Do the facility elevations match the terrain? ─────────────
+    from raptor.builder import FacilityNode, check_facility_elevations
+    nodes = []
+    for label, a, b in DEFAULT_CORRIDORS:
+        for name, (lat, lon) in zip(label.split(" -> "), (a, b)):
+            nodes.append(FacilityNode(name, lat, lon,
+                                      float(dem.elevation(lat, lon))))
+    elev_problems = check_facility_elevations(nodes, dem)
+    if elev_problems:
+        print("\nFacility elevations disagree with the terrain model:")
+        for p in elev_problems:
+            print(f"  ! {p}")
+
     # ── 3. Per-corridor verdict ───────────────────────────────────────
     floor, ceiling = con.corridor("FW_CRUISE")
     probe_agl = args.cruise_agl if args.cruise_agl is not None else 0.5 * (floor + ceiling)
