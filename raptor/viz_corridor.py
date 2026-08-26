@@ -1505,3 +1505,402 @@ def plot_energy_breakdown(energy_result, ax=None, title: str = None):
     if title:
         ax.set_title(title, fontsize=10, fontweight="bold")
     return ax
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMPARING AIRCRAFT
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Everything above draws one flight. These draw several against each
+# other, which needs a different discipline: the quantity that separates
+# two aircraft is rarely the one that separates two routes, and a figure
+# that shows only energy will make the smallest aircraft look best on
+# every case while hiding that it cannot carry the payload.
+
+
+def plot_uav_routes(runs, dem, constraints, airspace=None, ax=None,
+                    endpoint_names=None, title: str = None,
+                    figsize=(13.5, 5.6)):
+    """
+    Do different aircraft route differently, or only cost differently?
+
+    Two panels: the routes on one map, and their heights above ground on
+    one axis. The question is worth asking explicitly because the
+    intuition is that a bigger aircraft flies the same line more
+    expensively — and it does not. Climb angle is set by lift-to-drag and
+    installed power, not by mass, so the aircraft disagree about which
+    ground they can follow, and that changes the line.
+
+    Parameters
+    ----------
+    runs : sequence of dict
+        One per aircraft, each with ``label``, ``path`` and optionally
+        ``waypoints``.
+    """
+    plt = _mpl()
+    fig = None
+    if ax is None:
+        fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.15, 1.0], wspace=0.20)
+        ax = fig.add_subplot(gs[0, 0])
+        ax_agl = fig.add_subplot(gs[0, 1])
+    else:
+        ax_agl = None
+
+    paths = [r["path"] for r in runs]
+    labels = [r["label"] for r in runs]
+    plot_plan_view(paths, labels, dem, ax=ax, airspace=airspace,
+                   waypoints=[r.get("waypoints") for r in runs],
+                   endpoint_names=endpoint_names, title="Routes")
+    if ax_agl is not None:
+        plot_agl_overlay(paths, labels, dem, constraints, ax=ax_agl,
+                         title="Height above ground")
+    if fig is not None and title:
+        fig.suptitle(title, fontsize=12, fontweight="bold")
+    return fig if fig is not None else ax
+
+
+def plot_uav_battery(runs, ax=None, title: str = None, figsize=(11.5, 6.4),
+                     soc_reserve: float = 0.15):
+    """
+    The pack of every aircraft on one set of axes.
+
+    Three panels: state of charge, C-rate and cumulative energy, all
+    against time. Not voltage — the packs are different voltages, so
+    overlaying them compares nothing. C-rate is the normalised quantity
+    that *does* compare, and it is the one that says whether an aircraft
+    is working near its pack's limit.
+
+    Time rather than distance on the x-axis, deliberately: a faster
+    aircraft finishing sooner is the result, and a distance axis would
+    hide it.
+    """
+    plt = _mpl()
+    fig = plt.figure(figsize=figsize)
+    axes = fig.subplots(3, 1, sharex=True,
+                        gridspec_kw=dict(hspace=0.13,
+                                         height_ratios=[1.2, 1, 1]))
+    cmap = plt.get_cmap("tab10")
+
+    for i, r in enumerate(runs):
+        er = r["energy"]
+        tl = list(er.battery_timeline)
+        if not tl:
+            continue
+        t = np.array([s.time for s in tl]) / 60.0
+        c = cmap(i % 10)
+        axes[0].plot(t, [100 * s.SOC for s in tl], lw=1.9, color=c,
+                     label=f"{r['label']}  ({er.total_energy_wh:.0f} Wh, "
+                           f"{er.total_time/60:.1f} min)")
+        axes[1].plot(t, [s.c_rate for s in tl], lw=1.3, color=c)
+        axes[2].plot(t, [s.energy_consumed_wh for s in tl], lw=1.7, color=c)
+        # Where each aircraft finishes, so the eye can find the end.
+        axes[0].plot(t[-1], 100 * tl[-1].SOC, "o", ms=5, color=c,
+                     mec="white", mew=0.9)
+
+    axes[0].axhline(100 * soc_reserve, color=C_BUST, ls="--", lw=1.1)
+    axes[0].annotate(f"reserve {100*soc_reserve:.0f} %",
+                     xy=(0.995, 100 * soc_reserve),
+                     xycoords=("axes fraction", "data"), ha="right",
+                     va="bottom", fontsize=7, color=C_BUST)
+    axes[0].set_ylabel("SOC [%]")
+    axes[0].set_ylim(0, 105)
+    axes[0].legend(fontsize=7, loc="lower left", framealpha=0.93)
+
+    lim = max((r["aircraft"].battery_max_c_rate for r in runs), default=10.0)
+    axes[1].axhline(lim, color=C_BUST, ls="--", lw=0.9)
+    axes[1].annotate(f"pack limit {lim:.0f} C", xy=(0.995, lim),
+                     xycoords=("axes fraction", "data"), ha="right",
+                     va="top", fontsize=7, color=C_BUST)
+    axes[1].set_ylabel("C-rate")
+    axes[1].annotate("the normalised load — a small pack working hard "
+                     "and a large one loafing look the same in amps",
+                     xy=(0.02, 0.86), xycoords="axes fraction", fontsize=7,
+                     color="0.35")
+
+    axes[2].set_ylabel("energy [Wh]")
+    axes[2].set_xlabel("time [min]")
+    for a in axes:
+        a.spines[["top", "right"]].set_visible(False)
+        a.margins(x=0.01)
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold")
+    return fig
+
+
+#: The metrics an aircraft comparison turns on, and which way is better.
+SCORECARD = [
+    ("energy_wh",            "energy [Wh]",              "lower"),
+    ("time_min",             "flight time [min]",        "lower"),
+    ("soc_min_pct",          "lowest SOC [%]",           "higher"),
+    ("wh_per_km",            "Wh per km",                "lower"),
+    ("wh_per_payload_km",    "Wh per payload-km",        "lower"),
+    ("peak_c_rate",          "peak C-rate",              "lower"),
+]
+
+
+def plot_uav_scorecard(rows, ax=None, title: str = None, figsize=(13.0, 6.4)):
+    """
+    The headline aircraft comparison, six metrics at once.
+
+    Grouped bars: one group per metric, one bar per aircraft, hatched by
+    payload mode. Two of the six carry the argument.
+
+    **Wh per km** flatters whichever aircraft is smallest, because a
+    lighter machine spends less to move itself. **Wh per payload-km**
+    charges each aircraft for what it actually delivered, and reverses
+    the ranking whenever the small aircraft is carrying a third of what
+    the large one is. Showing one without the other is how a comparison
+    reaches the wrong recommendation while every number in it is right.
+
+    Parameters
+    ----------
+    rows : sequence of dict
+        One per (aircraft, payload mode), carrying the keys in
+        :data:`SCORECARD` plus ``uav``, ``payload_mode`` and
+        ``payload_kg``.
+    """
+    plt = _mpl()
+    fig, axes = plt.subplots(2, 3, figsize=figsize)
+    axes = axes.ravel()
+    uavs = list(dict.fromkeys(r["uav"] for r in rows))
+    modes = list(dict.fromkeys(r["payload_mode"] for r in rows))
+    cmap = plt.get_cmap("tab10")
+    hatch = {m: h for m, h in zip(modes, ["", "///"])}
+
+    for ax, (key, label, better) in zip(axes, SCORECARD):
+        x = np.arange(len(uavs))
+        w = 0.8 / max(len(modes), 1)
+        for j, mode in enumerate(modes):
+            vals, kg = [], []
+            for u in uavs:
+                hit = [r for r in rows
+                       if r["uav"] == u and r["payload_mode"] == mode]
+                vals.append(hit[0].get(key, np.nan) if hit else np.nan)
+                kg.append(hit[0].get("payload_kg", np.nan) if hit else np.nan)
+            pos = x - 0.4 + w * (j + 0.5)
+            ax.bar(pos, vals, width=w * 0.92,
+                   color=[cmap(i % 10) for i in range(len(uavs))],
+                   alpha=1.0 if j == 0 else 0.55, hatch=hatch.get(mode, ""),
+                   edgecolor="white", linewidth=0.6)
+            for xi, v in zip(pos, vals):
+                if np.isfinite(v):
+                    ax.annotate(f"{v:.3g}", (xi, v), ha="center",
+                                va="bottom", fontsize=6.5, color="0.25")
+        ax.set_xticks(x)
+        ax.set_xticklabels(uavs, fontsize=7.5)
+        ax.set_title(f"{label}   ({better} is better)", fontsize=9,
+                     fontweight="bold")
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.margins(y=0.18)
+
+    handles = [plt.Rectangle((0, 0), 1, 1, facecolor="0.6",
+                             hatch=hatch.get(m, ""), edgecolor="white",
+                             alpha=1.0 if j == 0 else 0.55,
+                             label=f"{m} payload")
+               for j, m in enumerate(modes)]
+    fig.legend(handles=handles, loc="lower center", ncol=len(modes),
+               fontsize=8, frameon=False, bbox_to_anchor=(0.5, -0.02))
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0.035, 1, 0.955))
+    return fig
+
+
+def plot_driver_comparison(rows, title: str = None, figsize=(12.5, 4.4)):
+    """
+    Energy against balanced against time, and whether the cap was met.
+
+    Three panels. The first two are the trade — what hurrying costs in
+    energy and buys in time. The third is the one that decides whether
+    the mission is flyable at all: an urgency carries a time cap, and an
+    objective that minimises energy can miss it.
+
+    A bar over the cap line is a mission that did not arrive in time. No
+    amount of energy saving makes that acceptable for a delivery with a
+    deadline, which is why the cap is drawn rather than left in a table.
+    """
+    plt = _mpl()
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+    labels = [r["driver"] for r in rows]
+    x = np.arange(len(rows))
+    cmap = plt.get_cmap("Set2")
+    colours = [cmap(i % 8) for i in range(len(rows))]
+
+    axes[0].bar(x, [r["energy_wh"] for r in rows], color=colours)
+    axes[0].set_ylabel("energy [Wh]")
+    axes[0].set_title("What it costs", fontsize=9, fontweight="bold")
+
+    axes[1].bar(x, [r["time_min"] for r in rows], color=colours)
+    for i, r in enumerate(rows):
+        cap = r.get("time_cap_min")
+        if cap:
+            axes[1].plot([i - 0.42, i + 0.42], [cap, cap], color=C_BUST,
+                         lw=1.8, ls="--")
+            if r["time_min"] > cap:
+                axes[1].annotate("over cap", (i, r["time_min"]), ha="center",
+                                 va="bottom", fontsize=7, color=C_BUST,
+                                 fontweight="bold")
+    axes[1].set_ylabel("flight time [min]")
+    axes[1].set_title("What it buys — dashed is the urgency's cap",
+                      fontsize=9, fontweight="bold")
+
+    axes[2].bar(x, [r["soc_min_pct"] for r in rows], color=colours)
+    for i, r in enumerate(rows):
+        floor = r.get("soc_floor_pct")
+        if floor:
+            axes[2].plot([i - 0.42, i + 0.42], [floor, floor], color=C_BUST,
+                         lw=1.8, ls="--")
+    axes[2].set_ylabel("lowest SOC [%]")
+    axes[2].set_title("What it leaves — dashed is the reserve",
+                      fontsize=9, fontweight="bold")
+
+    for ax in axes:
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=7.5)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.margins(y=0.16)
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    return fig
+
+
+def plot_phase_comparison(runs, title: str = None, figsize=(12.5, 4.2)):
+    """
+    Energy share against time share, by phase, for several aircraft.
+
+    One panel per aircraft so the phases stay side by side rather than
+    stacked. The number to read is the ratio printed above each pair:
+    above 1 the phase costs more than its share of the clock, and on a
+    VTOL the two rotor-borne phases are always well above 1.
+
+    Comparing aircraft here answers a question the totals cannot: whether
+    a heavier machine is worse *everywhere* or only in the hover, which
+    decides whether a short-hop mission and a long one want the same
+    aircraft.
+    """
+    plt = _mpl()
+    fig, axes = plt.subplots(1, len(runs), figsize=figsize, sharey=True)
+    if len(runs) == 1:
+        axes = [axes]
+    for ax, r in zip(axes, runs):
+        plot_energy_breakdown(r["energy"], ax=ax, title=r["label"])
+        ax.set_ylabel("share of mission [%]" if ax is axes[0] else "")
+        for t in ax.texts:
+            if "energy share divided" in t.get_text():
+                t.remove()
+    axes[0].annotate("×n is energy share divided by time share — above 1 the "
+                     "phase costs more than its share of the clock",
+                     xy=(0.5, -0.34), xycoords="axes fraction", ha="center",
+                     fontsize=7, color="0.4")
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold")
+    fig.tight_layout(rect=(0, 0.04, 1, 0.93))
+    return fig
+
+
+def plot_wind_exposure(runs, uav_configs, dem, title: str = None,
+                       figsize=(12.0, 4.6), n_bearings: int = 24):
+    """
+    How much this route's schedule depends on a wind nobody has measured.
+
+    Left, a polar rose of time penalty against wind direction, one curve
+    per aircraft, with both of Quito's candidate directions marked. They
+    are 250° apart, so a route whose rose is lobed has a schedule that
+    depends on which source is right; a route whose rose is round does
+    not.
+
+    Right, penalty against wind speed at each aircraft's own worst
+    direction, with each airframe's Beaufort limit drawn. The aircraft
+    differ here for two reasons at once — a faster cruise resists wind
+    better, and a higher wind rating lets the aircraft keep flying — and
+    the panel separates them: where a curve stops mattering is set by
+    speed, where it stops being legal by the rating.
+    """
+    plt = _mpl()
+    from .wind import (BEAUFORT_MS, QUITO_ANNUAL_MEAN, QUITO_REANALYSIS,
+                       QUITO_WINDIEST_MONTH, ROUGHNESS, WindField,
+                       wind_penalty_report)
+
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.0, 1.15], wspace=0.30)
+    ax_polar = fig.add_subplot(gs[0, 0], projection="polar")
+    ax_speed = fig.add_subplot(gs[0, 1])
+    cmap = plt.get_cmap("tab10")
+
+    def field(speed, direction):
+        return WindField(speed_ref=speed, direction_deg=direction,
+                         reference_height_m=10.0,
+                         reference_roughness_m=ROUGHNESS["open country"],
+                         roughness_length_m=ROUGHNESS["dense urban"],
+                         terrain_speedup=1.3)
+
+    bearings = np.linspace(0, 360, n_bearings + 1)
+    speed = QUITO_WINDIEST_MONTH.speed_ref
+    curves, worst_dirs = [], []
+    for r, u in zip(runs, uav_configs):
+        pen = np.array([
+            wind_penalty_report(r["path"], field(speed, float(b)), u,
+                                dem=dem).get("time_penalty_s", 0.0) / 60.0
+            for b in bearings])
+        curves.append(pen)
+        worst_dirs.append(float(bearings[int(np.argmax(pen))]))
+
+    base = min(min(float(c.min()) for c in curves) * 1.25, -0.05)
+    for i, (r, pen) in enumerate(zip(runs, curves)):
+        ax_polar.plot(np.radians(bearings), pen - base, lw=1.7,
+                      color=cmap(i % 10), label=r["label"])
+    ax_polar.plot(np.radians(np.arange(0, 361, 5)),
+                  np.full(73, -base), lw=1.2, color="0.3",
+                  label="zero (inside = wind helps)")
+    for w, tag, c in ((QUITO_ANNUAL_MEAN, "station NNW", "#C62828"),
+                      (QUITO_REANALYSIS, "reanalysis E", "#EF6C00")):
+        ax_polar.axvline(np.radians(w.direction_deg), color=c, lw=1.5,
+                         ls="--", alpha=0.85)
+        ax_polar.annotate(tag, xy=(np.radians(w.direction_deg), 1.03),
+                          xycoords=("data", "axes fraction"), fontsize=6.5,
+                          color=c, ha="center")
+    top = max(float(c.max()) for c in curves) - base
+    ax_polar.set_ylim(0, top * 1.08)
+    ticks = np.linspace(base, top + base, 5)
+    ax_polar.set_yticks(ticks - base)
+    ax_polar.set_yticklabels([f"{t:+.1f}" for t in ticks])
+    ax_polar.set_theta_zero_location("N")
+    ax_polar.set_theta_direction(-1)
+    ax_polar.tick_params(labelsize=6.5)
+    ax_polar.set_title(f"Penalty against wind direction\nat {speed:.1f} m/s",
+                       fontsize=9, fontweight="bold", pad=18)
+    ax_polar.legend(fontsize=6, loc="upper left",
+                    bbox_to_anchor=(-0.34, 1.10), framealpha=0.9)
+
+    speeds = np.linspace(0, 14, 22)
+    for i, (r, u, brg) in enumerate(zip(runs, uav_configs, worst_dirs)):
+        pen = [wind_penalty_report(r["path"], field(float(s), brg), u,
+                                   dem=dem).get("time_penalty_s", 0.0) / 60.0
+               for s in speeds]
+        c = cmap(i % 10)
+        ax_speed.plot(speeds, pen, lw=1.7, color=c,
+                      label=f"{r['label']}  (worst from {brg:.0f}°)")
+        ac = r.get("aircraft")
+        if ac is not None and ac.wind_rating_beaufort:
+            lo, _ = BEAUFORT_MS[ac.wind_rating_beaufort]
+            ax_speed.axvline(lo, color=c, ls="--", lw=1.2, alpha=0.7)
+    ax_speed.axvspan(QUITO_REANALYSIS.speed_ref, QUITO_WINDIEST_MONTH.speed_ref,
+                     color="#90A4AE", alpha=0.30, lw=0)
+    ax_speed.annotate("what Quito\nactually has",
+                      xy=(QUITO_WINDIEST_MONTH.speed_ref + 0.25, 0.62),
+                      xycoords=("data", "axes fraction"), fontsize=7,
+                      color="#37474F")
+    ax_speed.set_xlabel("wind at the 10 m mast [m/s]")
+    ax_speed.set_ylabel("time penalty [min]")
+    ax_speed.set_title("Penalty against wind speed\n(dashed: each airframe's "
+                       "own limit)", fontsize=9, fontweight="bold")
+    ax_speed.legend(fontsize=6.5, loc="upper left")
+    ax_speed.spines[["top", "right"]].set_visible(False)
+
+    fig.subplots_adjust(left=0.10, right=0.965, top=0.78, bottom=0.17,
+                        wspace=0.38)
+    if title:
+        fig.suptitle(title, fontsize=12, fontweight="bold")
+    return fig

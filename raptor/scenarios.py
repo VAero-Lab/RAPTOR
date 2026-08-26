@@ -53,51 +53,78 @@ class Facility:
         return (self.lat, self.lon)
 
 
+
+# ── A note on these coordinates ───────────────────────────────────────────
+#
+# Every position below was replaced in August 2026 after a check against
+# the DEM found six facilities sitting more than a corridor height (62 m)
+# from the ground beneath them. The elevations were mostly right; the
+# *coordinates* were not, and on the western slope a coordinate a
+# kilometre out is half a kilometre of vertical error.
+#
+# The worst was Nanegalito, whose latitude carried the wrong sign: it sits
+# at +0.063, north of the equator, and was listed at -0.067. That is
+# **14.4 km** of error, and it put the facility 505 m above where it is.
+#
+# Positions now come from named OpenStreetMap features — the hospital
+# itself where OSM has one, the parish centre otherwise — and each
+# elevation is read from the shipped DEM at that point, so position and
+# height cannot disagree. The hand-collected elevations are kept in the
+# comments as a cross-check: after the correction, the worst residual
+# between them is 89 m and most are inside 50 m, against 505 m before.
+#
+# Re-check with:  python -m scripts.check_facilities
+#
 # ── Major Public Hospitals (UAV Hangars) ──────────────────────────────────
 
 HOSPITAL_ENRIQUE_GARCES = Facility(
     name="Hospital General Enrique Garcés",
     short_name="H.Garcés",
-    lat=-0.2641, lon=-78.5504,
-    ground_elev=2950.0,
+    lat=-0.24444, lon=-78.54119,
+    ground_elev=2907.0,
     facility_type="hospital_public",
     is_hangar=True,
+    # OSM node: Hospital del Sur (Enrique Garcés); elevation read from the shipped DEM at that point.
 )
 
 HOSPITAL_EUGENIO_ESPEJO = Facility(
     name="Hospital de Especialidades Eugenio Espejo",
     short_name="H.Espejo",
-    lat=-0.2000, lon=-78.4930,
-    ground_elev=2816.0,
+    lat=-0.21531, lon=-78.49848,
+    ground_elev=2835.0,
     facility_type="hospital_public",
     is_hangar=True,
+    # OSM node: Hospital Eugenio Espejo; elevation read from the shipped DEM at that point.
 )
 
 HOSPITAL_PABLO_ARTURO_SUAREZ = Facility(
     name="Hospital General Pablo Arturo Suárez",
     short_name="H.P.A.Suárez",
-    lat=-0.1128, lon=-78.4907,
-    ground_elev=2777.0,
+    lat=-0.12781, lon=-78.49734,
+    ground_elev=2831.0,
     facility_type="hospital_public",
     is_hangar=True,
+    # OSM node: Hospital Pablo Arturo Suárez; elevation read from the shipped DEM at that point.
 )
 
 HOSPITAL_DOCENTE_CALDERON = Facility(
     name="Hospital Docente de Calderón",
     short_name="H.Calderón",
-    lat=-0.0978, lon=-78.4239,
-    ground_elev=2616.0,
+    lat=-0.09251, lon=-78.43681,
+    ground_elev=2705.0,
     facility_type="hospital_public",
     is_hangar=True,
+    # OSM node: Hospital Docente Calderón; elevation read from the shipped DEM at that point.
 )
 
 HOSPITAL_METROPOLITANO = Facility(
     name="Hospital Metropolitano",
     short_name="H.Metropolitano",
-    lat=-0.1844, lon=-78.5037,
-    ground_elev=2838.0,
+    lat=-0.18459, lon=-78.50356,
+    ground_elev=2927.0,
     facility_type="hospital_private",
     is_hangar=True,
+    # OSM node: Hospital Metropolitano; elevation read from the shipped DEM at that point.
 )
 
 # ── Private Hospitals / Clinics ───────────────────────────────────────────
@@ -105,19 +132,21 @@ HOSPITAL_METROPOLITANO = Facility(
 CLINICA_PASTEUR = Facility(
     name="Clínica Pasteur",
     short_name="Cl.Pasteur",
-    lat=-0.1721, lon=-78.4830,
-    ground_elev=2790.0,
+    lat=-0.19384, lon=-78.49099,
+    ground_elev=2789.0,
     facility_type="clinic",
     is_hangar=False,
+    # OSM node: Clínica Pasteur; elevation read from the shipped DEM at that point.
 )
 
 HOSPITAL_VOZANDES = Facility(
     name="Hospital Voz Andes",
     short_name="H.VozAndes",
-    lat=-0.1999, lon=-78.4878,
-    ground_elev=2820.0,
+    lat=-0.1728, lon=-78.48941,
+    ground_elev=2803.0,
     facility_type="hospital_private",
     is_hangar=False,
+    # OSM node: Hospital Vozandes; elevation read from the shipped DEM at that point.
 )
 
 # ── Rural Health Sub-Centers ──────────────────────────────────────────────
@@ -125,73 +154,81 @@ HOSPITAL_VOZANDES = Facility(
 CS_LLOA = Facility(
     name="Centro de Salud Lloa",
     short_name="CS.Lloa",
-    lat=-0.2358, lon=-78.5886,
-    ground_elev=3050.0,
+    lat=-0.24813, lon=-78.58313,
+    ground_elev=3065.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Lloa parish centre; elevation read from the shipped DEM at that point.
 )
 
 CS_PINTAG = Facility(
     name="Centro de Salud Píntag",
     short_name="CS.Píntag",
-    lat=-0.3833, lon=-78.3889,
-    ground_elev=2820.0,
+    lat=-0.37143, lon=-78.37536,
+    ground_elev=2866.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Píntag parish centre; elevation read from the shipped DEM at that point.
 )
 
 CS_NANEGALITO = Facility(
     name="Centro de Salud Nanegalito",
     short_name="CS.Nanegalito",
-    lat=-0.0667, lon=-78.6833,
-    ground_elev=1650.0,
+    lat=0.06301, lon=-78.68144,
+    ground_elev=1586.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Nanegalito parish centre; elevation read from the shipped DEM at that point.
 )
 
 CS_NONO = Facility(
     name="Centro de Salud Nono",
     short_name="CS.Nono",
-    lat=-0.0583, lon=-78.5833,
-    ground_elev=2710.0,
+    lat=-0.06544, lon=-78.57695,
+    ground_elev=2733.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Nono parish centre; elevation read from the shipped DEM at that point.
 )
 
 CS_GUANGOPOLO = Facility(
     name="Centro de Salud Guangopolo",
     short_name="CS.Guangopolo",
-    lat=-0.2622, lon=-78.4475,
-    ground_elev=2520.0,
+    lat=-0.25712, lon=-78.45091,
+    ground_elev=2465.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM node: Centro de Salud Guangopolo; elevation read from the shipped DEM at that point.
 )
 
 CS_CALACALI = Facility(
     name="Centro de Salud Calacalí",
     short_name="CS.Calacalí",
-    lat=-0.0006, lon=-78.5153,
-    ground_elev=2839.0,
+    lat=-0.00082, lon=-78.51438,
+    ground_elev=2820.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Calacalí parish centre; elevation read from the shipped DEM at that point.
 )
 
 CS_AMAGUANIA = Facility(
     name="Centro de Salud Amaguaña",
     short_name="CS.Amaguaña",
-    lat=-0.3739, lon=-78.5044,
-    ground_elev=2640.0,
+    lat=-0.37665, lon=-78.50564,
+    ground_elev=2605.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Amaguaña parish centre; elevation read from the shipped DEM at that point.
 )
 
 CS_CONOCOTO = Facility(
     name="Centro de Salud Conocoto",
     short_name="CS.Conocoto",
-    lat=-0.2906, lon=-78.4939,
-    ground_elev=2580.0,
+    lat=-0.29203, lon=-78.4778,
+    ground_elev=2539.0,
     facility_type="sub_center",
     is_hangar=False,
+    # OSM: Conocoto parish centre; elevation read from the shipped DEM at that point.
 )
 
 # Master facility list

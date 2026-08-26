@@ -69,6 +69,32 @@ class MissionPath:
         return self._array
 
     @property
+    def metrics(self):
+        """
+        Path metrics for the concatenated mission.
+
+        Present because the checks that run on a finished path — the
+        envelope check, the range limit — read ``path.metrics``, and a
+        mission that could not answer them would silently skip them.
+        """
+        from .path import PathMetrics
+        arr = self._array
+        dz = np.diff(arr[:, 2])
+        seg = [s.segment_type for s in self.segments]
+        return PathMetrics(
+            total_time=float(arr[-1, 3]),
+            total_ground_distance=float(arr[-1, 4]),
+            total_altitude_gain=float(dz[dz > 0].sum()),
+            total_altitude_loss=float(-dz[dz < 0].sum()),
+            max_altitude=float(arr[:, 2].max()),
+            min_altitude=float(arr[:, 2].min()),
+            n_segments=len(self.segments),
+            n_vtol_segments=sum(1 for s in seg if "VTOL" in str(s)),
+            n_fw_segments=sum(1 for s in seg if "FW" in str(s)),
+            segment_summary={},
+        )
+
+    @property
     def total_distance_m(self) -> float:
         return float(self._array[-1, 4])
 
