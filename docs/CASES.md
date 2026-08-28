@@ -1057,6 +1057,19 @@ immediately — the peak is a rotor-borne phase every single time.
 **Cumulative energy** separates what reached the drivetrain from what
 became heat in the pack.*
 
+*The current panel used to carry a C-rate twin axis. It is gone: C-rate
+is the same curve divided by a constant, so the second scale added no
+second fact and cost a reader the axis they could act on. The pack's
+own current limit in amps is drawn instead — which is what a pack, an
+ESC and a fuse are each rated in.*
+
+*On the multi-aircraft version of this figure, voltage is shown **per
+cell**. The three airframes are 8S, 12S and 12S, so their pack voltages
+are three unrelated numbers and overlaying them compares nothing;
+divided by the series count they land on one 3.0–4.2 V scale where the
+sag under a hover load can be read across aircraft and against a single
+cut-off.*
+
 *Rotor-borne phases are always shaded however short they are. The
 fixed-wing slivers are filtered out: a terrain-following leg is forty
 alternating climbs and descents, and shading each one turns the
@@ -1155,3 +1168,193 @@ And every net is still positive, because the slow leg lasts longer than
 the fast leg saves. That asymmetry is why a one-way delivery and a round
 trip are different planning problems, and it is invisible in any figure
 that averages over a mission.
+
+---
+
+## Part 6 — The production run
+
+Parts 1 to 5 are studies: each isolates one variable and answers one
+question about the model. Part 6 is the run the figures in the paper
+come from, and it is organised the other way round — **one script per
+case**, each fixing a facility pair and a mission shape and then
+sweeping everything else.
+
+```bash
+python examples/PAPER/case1_workhorse.py        # one case, full effort
+python examples/PAPER/compare_all.py            # after all eight
+```
+
+The folder is `examples/PAPER/` and its `out/` directory is
+git-ignored: it is a few hundred megabytes of PNG, CSV and JSON, all of
+it regenerable from the eight scripts and the DEM.
+
+### What each case sweeps
+
+Every case runs the same matrix, so any two cases can be laid side by
+side without asking what else differed:
+
+| Axis | Values | What it answers |
+|---|---|---|
+| **Aircraft** | VA17, VA23, VA25 | which airframe suits this corridor |
+| **Payload mode** | `max`, `equal` | see below — neither alone is honest |
+| **Driver** | energy/routine, balanced/urgent, time/emergency | what hurrying costs |
+
+Eighteen runs per case, eight cases, and then a wind sweep evaluated
+after the fact on every finished route — calm, Quito's three station
+fields, the reanalysis field, and twenty-four bearings.
+
+**The two payload modes answer different questions.** `equal` is the
+controlled experiment: every aircraft carries the smallest one's
+capacity, so the difference between them is the aircraft. `max` is the
+operational question: what each machine can actually do, which is what
+an operator is buying. A figure showing only **Wh per km** ranks the
+smallest aircraft first under `equal` and misleads — it is lighter, so
+it spends less moving itself. **Wh per payload-km** charges each
+aircraft for what it delivered and reverses the ranking whenever the
+small aircraft is carrying a third of the load. Both are reported
+throughout, side by side, for exactly that reason.
+
+### The eight cases
+
+| # | Pair | Shape | The question |
+|---|---|---|---|
+| 1 | Espejo → Pablo Arturo Suárez | out and back | What does a routine inter-hospital delivery cost, on a corridor that is legal end to end? |
+| 2 | Espejo → Metropolitano; Espejo → VozAndes | out and back | Below what distance does a drone delivery stop making sense? |
+| 3 | Espejo → Conocoto, Guangopolo, Amaguaña | sample collection | What does a routine sample-collection round cost, and does the order of pickups matter? |
+| 4 | Espejo → Lloa | out and back | Why is a facility ten kilometres away harder to reach than one twenty-two kilometres away? |
+| 5 | Espejo → Nanegalito | out and back | Can the hardest corridor in the network be flown at all, and by which aircraft? |
+| 6 | Espejo → Píntag | one way | How much energy does a time-critical delivery spend to arrive sooner, and does it arrive in time? |
+| 7 | Calderón → Amaguaña | one way | How far across the district can a single flight reach, and what is left at the end of it? |
+| 8 | Nono → Nanegalito | out and back | Would a satellite base on the western slope serve it better than the city does? |
+
+Case 2 runs twice, against Metropolitano and against VozAndes, because
+the question is about a *distance threshold* and one pair cannot locate
+one.
+
+### What the two payload modes mean, precisely
+
+`max` means **at the aircraft's certificated limit**, and for these
+three airframes that is exactly at maximum take-off mass:
+
+| | empty | quoted capacity | all-up at capacity | MTOW |
+|---|---|---|---|---|
+| VA17 | 3.40 kg | 0.90 kg | 4.30 kg | 4.30 kg |
+| VA23 | 10.00 kg | 2.50 kg | 12.50 kg | 12.50 kg |
+| VA25 | 11.00 kg | 2.00 kg | 13.00 kg | 13.00 kg |
+
+**This is a coincidence of the three published datasheets, not an
+identity.** `payload_capacity_kg` is a declared manufacturer figure
+(`vehicles.py`), and `validate()` only cross-checks it against
+`m_tow_max − m_tow` to a 0.05 kg tolerance. It happens to agree exactly
+for all three, which is how every `max` run lands on the limit. The
+over-mass guard is a strict `>`, so sitting precisely at MTOW passes
+without a warning — nothing is broken, but nothing is spare either.
+
+**So `max`-mode feasibility is optimistic and should be reported that
+way.** No operator flies at the certificated limit: reserve fuel of any
+kind, sensors, ingress protection and mass drift over an airframe's
+life all eat into the same headroom. A result that a mission is
+feasible in `max` mode means it is feasible *for an aircraft carrying
+its full quoted payload and nothing else*. Conclusions that have to
+survive contact with an operator should rest on `equal` mode, or on
+`max` with a stated margin — not on `max` alone.
+
+**Case 3 is the only mission whose mass changes along the route**, and
+it is the case that exposed what "each aircraft at its own maximum
+capacity" has to mean when it does. A collection round picks up at
+every stop, so the aircraft is heaviest on the final leg — flown on the
+least remaining charge, which is the coupling the case exists to show.
+Handing the runner's payload figure straight through as the *per-stop*
+increment asked a three-centre round to fly at three times capacity:
+every airframe went over its maximum take-off mass and all eighteen
+runs were refused. The capacity is now divided across the stops, so the
+**peak** mass is the capacity. A configuration that is still impossible
+is written to `refused.csv` with the reason rather than dropped —
+"this aircraft cannot fly this mission" is an answer the paper wants.
+
+### Figures each case produces
+
+Per aircraft, on the case's reference driver and payload mode:
+
+* `plan_profile_<uav>.png` — the four-panel view, **now with the three
+  reference routes on it**: straight line at constant altitude,
+  unoptimised terrain-following, and the A\* grid. Without them the
+  optimised path is a line with no scale.
+* `path_3d_<uav>.png` — the same routes over the terrain
+* `optimizer_<uav>.png` — six routes the search tried, and the
+  objective against the constraint penalties behind it
+* `battery_<uav>.png` — state of charge, terminal voltage, pack current
+  and cumulative energy, phases shaded
+* `energy_phases_<uav>.png` — energy share against time share, by phase
+
+Comparing aircraft:
+
+* `uav_routes.png`, `uav_battery.png`, `phase_breakdown.png`,
+  `wind_exposure.png`, `uav_scorecard.png`, `driver_comparison.png`
+
+And two data files, `results.csv` / `results.json`, carrying every
+number in every figure plus the ones no figure shows.
+
+### The flight plan, beside the flight
+
+An optimised terrain-following leg is not a flight plan. It is two to
+three hundred sampled states containing thirty-odd separate climbs and
+descents, most of them a few metres, and no ground station should be
+handed that. So each case also produces **`waypoints.csv`**: the same
+leg redrawn as the fewest straight segments that fit inside the
+60–122 m AGL band, respecting the aircraft's own climb and descent
+limits.
+
+![The four-panel view with baselines and the simplified path](../examples/PAPER/out/case1_workhorse/plan_profile_va17.png)
+
+*The simplified path is the heavy dark line with numbered circles. It
+sits **beside** the flown path, never instead of it — the energy and
+compliance numbers are computed on what the aircraft flies, and the
+simplification is a separate object with its own reported cost.*
+
+*On the VA17's Espejo→Suárez leg: **28 vertical manoeuvres become 8**,
+thirteen waypoints, 62–120 m above ground against a 60–122 m band, for
+**+7 % cruise energy**. That last number is the point of reporting it:
+tidying a profile is not free, and a reader who is told only the
+waypoint reduction has been told the flattering half.*
+
+**The numbers are the same numbers everywhere.** Waypoint 6 in the map
+panel is waypoint 6 in the altitude panel, in the height-above-ground
+panel, in the lateral-offset panel, in the three-dimensional view, and
+in row 6 of `waypoints.csv`. A point picked off any figure can be
+looked up, and the file goes to a ground station unmodified.
+
+**Why the simplified path is straight in altitude and wavy above
+ground.** Those are the same line. A straight segment holds one
+altitude gradient; the ground underneath it does not, so its height
+above ground moves. This is the same reading trap as the constant-
+altitude baseline in Part 4, and it is why both panels are drawn.
+
+**Where it refuses.** Where the terrain demands more climb gradient
+than the airframe has under a 62 m band, no straight segment fits. The
+pass then falls back to the altitude the aircraft actually flew at that
+station rather than inventing one, so **every waypoint it emits is
+either inside the band or a point already flown** — and the summary
+line says so. A simplification that could hand back a tidy route
+through the ceiling is worse than no simplification, and the first
+version of this pass could (Finding 23 in `ROUND4.md`).
+
+### The optimiser panel shows the same six routes for every case
+
+Earlier versions sub-sampled the search history at a rate that depended
+on `maxiter`, so a 6-generation run drew six routes and a 30-generation
+run drew eight, and two cases could not be read side by side. The
+optimiser now records **every** generation and the figure selects a
+fixed six from it: the initial guess, four evenly spaced intermediates,
+and the final answer. Which snapshots a figure shows is the figure's
+business, not the optimiser's.
+
+### One thing this run is careful about
+
+The battery panels and the results table are computed from the same
+arithmetic, not from two routes to the same quantity. That sounds like
+a triviality and it was not: the two disagreed by 8 % on a round trip
+until the figure stopped re-analysing the concatenated mission at the
+departure payload. **An out-and-back carries the cargo out and comes
+home empty.** See Findings 21 and 22 in `ROUND4.md` — both were found
+by drawing a number beside itself.

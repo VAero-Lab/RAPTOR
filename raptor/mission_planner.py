@@ -350,7 +350,15 @@ class MissionPlanner:
             fp = rp.flight_path
             loaded = (self.ac.with_payload(leg.payload_kg)
                       if leg.payload_kg else self.ac)
+            # Started from the state of charge the leg actually departs
+            # with, not from a full pack. Every leg after the first was
+            # being analysed at 4.2 V per cell, which reports a lower
+            # current for the same power and draws a timeline that jumps
+            # back to 100 % at each stop — the pack does not refill
+            # itself between legs unless a battery action says so, and
+            # that is tracked separately below.
             energy_result = analyze_path_energy(fp, loaded,
+                                                SOC_initial=current_soc,
                                                 SOC_min=leg_min_soc)
             terrain_report = self.terrain_analyzer.analyze(fp)
             airspace_report = air.check_path(fp) if air else None

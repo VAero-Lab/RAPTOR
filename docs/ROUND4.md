@@ -37,6 +37,8 @@ Ten stages of work, in four areas.
 | **Wind** | Cited Quito defaults, a two-roughness boundary layer, and Beaufort limits read conservatively |
 | **Closing out** | Three questions left open at the end of the first pass, all three now answered |
 | **Figures** | Four defects a reader found, a missing altitude panel, per-flight figures for every case and pair, and a wind figure that says something about a route |
+| **Flight plans** | Optimised profiles simplified into a numbered waypoint list a ground station can fly, with the cost of tidying reported rather than assumed |
+| **Production run** | Eight paper cases, three aircraft, two payload modes and three mission drivers — and three accounting bugs that only a figure disagreeing with a table would have caught |
 
 Test count went from 131 to 166, and the suite passes with warnings
 promoted to errors.
@@ -50,6 +52,13 @@ curve with a measured one changed the endurance by *nothing*, because
 the energy budget never consulted the curve. Two independent statements
 of the same quantity, and only the one with no chemistry in it reached
 the answer.
+
+**The most repeated** is the shape of Finding 12, which turned up five
+separate times across the round: *a correct mechanism that some caller
+did not use.* Findings 21, 22 and 23 are all that pattern, and all
+three surfaced only when a figure was drawn beside the number it was
+supposed to illustrate. Drawing the same quantity twice, by two
+routes, found more real defects this round than reading the code did.
 
 ---
 
@@ -989,6 +998,119 @@ in every plan view are polylines with corners the aircraft could not
 fly, and the energy of turning is uncounted. It is the Finding 12
 pattern again, and I missed it because I checked whether the value was
 *consistent* rather than whether anything *consumed* it.
+
+---
+
+## Finding 21 — A mission does not have *a* payload
+
+Found by a figure disagreeing with a table. The battery panel of a
+two-leg round trip reported **73 Wh**; the planner's own line for the
+same run reported **67.6 Wh**. Both were computed from the same flown
+path, in the same process, seconds apart.
+
+**What the code was doing.** The figure needed one energy timeline for
+the whole mission, so it concatenated the legs into a `MissionPath` and
+re-analysed that with `analyze_path_energy(path, ac.with_payload(kg))`.
+That call takes *one* payload. It was given the departure payload.
+
+**Why it is wrong.** An out-and-back carries the cargo out and comes
+home empty; a supply tour sheds a box at every stop. Re-analysing the
+whole path at the departure payload charges the aircraft for cargo it
+has already delivered. This is the same mistake as Finding 16, arriving
+by a different door: there it was the *planner* re-analysing a
+re-planned route, here it is a *figure* re-analysing a finished one.
+The planner had been fixed; the figure had not, because it was written
+later and nothing compared the two numbers.
+
+**What changed in the numbers.** 73 Wh → 67.6 Wh on a 20.3 km VA17
+round trip: **8 % of the mission energy, larger than most of the
+effects the figures exist to show.** A reader comparing the battery
+panel against the results table would have found a discrepancy with no
+explanation attached to it.
+
+**What to do about it.** `stitch_energy()` in `raptor/mission_view.py`
+concatenates the planner's own per-leg results — each analysed at that
+leg's payload — rather than re-analysing anything. Figures and headline
+numbers are now the same arithmetic by construction, not by agreement.
+The general rule this is an instance of: **a quantity that a mission
+carries per leg must never be collapsed to a mission-level scalar for
+the convenience of a function signature.**
+
+---
+
+## Finding 22 — Every leg after the first started on a full battery
+
+Visible in the fix for Finding 21 and not before it: once the legs were
+stitched, the state-of-charge trace **jumped back to 100 % at each
+intermediate landing.**
+
+**What the code was doing.** `MissionPlanner._plan_legs` called
+`analyze_path_energy(fp, loaded, SOC_min=leg_min_soc)`. The function's
+signature is `(path, ac, SOC_initial=1.0, SOC_min=0.2)`. `SOC_initial`
+was never passed.
+
+**Why it is wrong.** The planner tracks state of charge across legs
+correctly — `soc_start`, `soc_end`, coupling on energy drawn from the
+cells, all of it right — in *separate* variables. The per-leg energy
+analysis knew none of that. So leg 3 of a supply tour was modelled with
+its cells at 4.2 V when the aircraft was in fact down near 3.9 V, and
+the pack does not refill itself between stops.
+
+**What changed in the numbers.** Less than the presentation defect
+suggests, and not nothing. Terminal voltage is the state variable the
+current is derived from: at a fixed power demand, a pack modelled 0.3 V
+per cell too high draws proportionally **less current**, understating
+the C-rate, the I²R loss and therefore the energy that leaves the
+cells. The direction of the error is always the same — later legs
+looked cheaper and cooler than they are — and it compounds along a
+multi-stop mission, which is exactly the mission type Part 2 of
+`CASES.md` is about.
+
+**What to do about it.** The planner now passes
+`SOC_initial=current_soc`. The existing `soc_start`/`soc_end` coupling
+is untouched: it was already right, and it stays the authority. This is
+the Finding 12 pattern once more — a correct mechanism that one caller
+did not use — and it is the third time this round that the symptom was
+a figure looking wrong rather than a number being obviously wrong.
+
+---
+
+## Finding 23 — A simplification that could hand back an illegal path
+
+The path-simplification pass added this round redraws a leg's altitude
+profile as the fewest straight segments that fit inside the AGL tube.
+Its first working version reported a tidy 16-manoeuvre profile that
+reached **145 m above ground against a 122 m ceiling.**
+
+**What the code was doing.** The greedy walk narrows a cone of feasible
+slopes station by station. Where the tube is *tighter than the
+aircraft's own climb and descent limits* — steep ground under a 62 m
+band — the cone closes before the walk can advance even one station.
+The fallback aimed at the middle of the tube and clamped the result to
+the slope limits, which is to say it invented an altitude and then
+clipped it for a reason unrelated to whether it was legal.
+
+**Why it is wrong.** A simplification exists to produce something a
+ground station can fly. **The one output it must never produce is a
+route that busts the ceiling** — and this one could, silently, while
+reporting a large reduction in manoeuvre count as if it had succeeded.
+
+**What changed in the numbers.** On the VA17 Espejo→Suárez leg: 28
+manoeuvres → 16, 57–145 m AGL, *outside the band*, became 28 → 8,
+62–120 m AGL, inside it. The simplification got **better** as well as
+legal, because the fallback now lands on a point the aircraft already
+flew rather than on a clipped guess that the next segment has to
+recover from.
+
+**What to do about it.** The walk is given the flown profile and falls
+back to it, clipped into the tube, for the one station it cannot
+bridge. Every breakpoint is now either inside the tube or a point the
+aircraft actually flew, so the output is legal by construction rather
+than by a check afterwards. The final breakpoint is likewise only moved
+onto the landing funnel's altitude if doing so keeps the last segment
+inside the tube — overwriting it unconditionally, which the first
+version did, tilted that segment and undid the guarantee the whole walk
+had just established.
 
 ---
 

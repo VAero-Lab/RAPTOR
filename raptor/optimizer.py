@@ -159,6 +159,10 @@ class OptimizationResult:
     #: improved; this says which constraint it stopped violating, which
     #: is the half a reader needs in order to trust the answer.
     penalty_history: List[dict] = field(default_factory=list)
+    #: The parameter vector the search started from, so a history figure
+    #: can show the *initial* route rather than the best of generation
+    #: one — which is already optimised and hides where the search began.
+    theta_initial: Optional[np.ndarray] = None
 
     def summary(self) -> str:
         """Human-readable result summary."""
@@ -370,6 +374,7 @@ class PathOptimizer:
         self._convergence_history = []
         self._parameter_history = []
         self._penalty_history = []
+        self._theta_0 = None
         self._generation = 0
         self._callback_interval = 1  # record every N generations
 
@@ -488,6 +493,7 @@ class PathOptimizer:
         self._convergence_history = []
         self._parameter_history = []
         self._penalty_history = []
+        self._theta_0 = None
         self._generation = 0
 
         # ── Build objective function ──────────────────────────────────────
@@ -536,8 +542,11 @@ class PathOptimizer:
             self._convergence_history.append(self._best_obj)
 
             # Sample parameter snapshots periodically
-            if self._generation % max(1, maxiter // 20) == 0:
-                self._parameter_history.append(xk.copy())
+            # Every generation is kept. Which ones a figure shows is the
+            # figure's business, and sampling here at a rate that depends
+            # on `maxiter` gave a different number of snapshots per run —
+            # so two cases could not be read side by side.
+            self._parameter_history.append(xk.copy())
 
             if verbose and self._generation % 5 == 0:
                 # Decode current best for display
@@ -614,9 +623,9 @@ class PathOptimizer:
             max_ceiling_excess_m=final_terrain.max_ceiling_excess,
             penalties=final_b,
             compliance=assess_compliance(
-                final_path, final_terrain, final_air,
+                path_template, final_terrain, None,
                 regulation=self.regulation, context=self.context,
-                constraints=self.constraints, airspace=airspace,
+                constraints=self.constraints, airspace=None,
             ),
             compliance_notes=self.context.compliance_findings(self.regulation),
             initial_feasible=initial_feasible,
@@ -626,6 +635,8 @@ class PathOptimizer:
             convergence_history=self._convergence_history.copy(),
             parameter_history=self._parameter_history.copy(),
             penalty_history=list(self._penalty_history),
+            theta_initial=(None if self._theta_0 is None
+                           else self._theta_0.copy()),
             initial_energy_wh=initial_energy_wh,
             initial_time_s=initial_time_s,
             energy_improvement_pct=energy_imp,
@@ -991,6 +1002,7 @@ class PathOptimizer:
         self._convergence_history = []
         self._parameter_history = []
         self._penalty_history = []
+        self._theta_0 = None
         self._generation = 0
 
         # ── Objective function ───────────────────────────────────────
@@ -1029,6 +1041,8 @@ class PathOptimizer:
             except Exception:
                 return 1e10
 
+        self._theta_0 = np.array(theta_0, dtype=float).copy()
+
         # ── DE callback ──────────────────────────────────────────────
         def de_callback(xk, convergence):
             self._generation += 1
@@ -1060,8 +1074,11 @@ class PathOptimizer:
             except Exception:
                 pass
 
-            if self._generation % max(1, maxiter // 20) == 0:
-                self._parameter_history.append(xk.copy())
+            # Every generation is kept. Which ones a figure shows is the
+            # figure's business, and sampling here at a rate that depends
+            # on `maxiter` gave a different number of snapshots per run —
+            # so two cases could not be read side by side.
+            self._parameter_history.append(xk.copy())
 
             if verbose and self._generation % 5 == 0:
                 routed_path.parameter_vector = xk
@@ -1228,6 +1245,8 @@ class PathOptimizer:
             convergence_history=self._convergence_history.copy(),
             parameter_history=self._parameter_history.copy(),
             penalty_history=list(self._penalty_history),
+            theta_initial=(None if self._theta_0 is None
+                           else self._theta_0.copy()),
             initial_energy_wh=initial_energy_wh,
             initial_time_s=initial_time_s,
             energy_improvement_pct=energy_imp,

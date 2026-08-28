@@ -553,3 +553,51 @@ def test_planner_soc_matches_the_energy_it_drew():
     assert drawn > leg.energy_result.total_energy_wh     # there is a loss
     assert leg.soc_end == pytest.approx(
         leg.soc_start - drawn / planner.battery_wh, rel=1e-9)
+
+
+# ── Mission-level energy: stitched, not re-analysed ───────────────────
+
+def test_stitch_energy_matches_the_sum_of_its_legs():
+    """
+    The defect: a figure re-analysed the concatenated mission at the
+    *departure* payload, charging the aircraft for cargo it had already
+    delivered. On a two-leg round trip that was 8 % of the mission.
+    """
+    from dataclasses import dataclass
+    from raptor.energy import BatteryState, MissionEnergyResult
+    from raptor.mission_view import stitch_energy
+
+    def leg(wh, secs, soc_end):
+        n = 5
+        tl = [BatteryState(time=i * secs / (n - 1),
+                           SOC=1.0 - (1.0 - soc_end) * i / (n - 1),
+                           voltage=44.0, current_draw=10.0, power_elec=440.0,
+                           energy_consumed_wh=wh * i / (n - 1),
+                           mah_consumed=100.0 * i / (n - 1),
+                           mah_remaining=1000.0, percent_remaining=90.0,
+                           c_rate=1.0, ohmic_loss_w=2.0, power_limited=False)
+              for i in range(n)]
+        return MissionEnergyResult(
+            segments=[], total_energy_wh=wh, total_energy_j=wh * 3600.0,
+            total_mah_consumed=100.0, total_time=secs, SOC_final=soc_end,
+            percent_remaining=100 * soc_end, mah_remaining=1000.0,
+            feasible=True, min_SOC=soc_end, battery_timeline=tl,
+            energy_from_cells_wh=wh * 1.05, ohmic_loss_wh=wh * 0.05,
+            max_c_rate=1.0, c_rate_exceeded=False, power_limited=False)
+
+    @dataclass
+    class _Leg:
+        energy_result: MissionEnergyResult
+
+    legs = [_Leg(leg(40.0, 600.0, 0.9)), _Leg(leg(28.0, 480.0, 0.8))]
+    er = stitch_energy(legs)
+
+    assert er.total_energy_wh == pytest.approx(68.0)
+    assert er.total_time == pytest.approx(1080.0)
+    # Timeline runs in mission time and mission energy, not leg-local.
+    t = [s.time for s in er.battery_timeline]
+    wh = [s.energy_consumed_wh for s in er.battery_timeline]
+    assert t == sorted(t)
+    assert wh == sorted(wh)
+    assert t[-1] == pytest.approx(1080.0)
+    assert wh[-1] == pytest.approx(68.0)

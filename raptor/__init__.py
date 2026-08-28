@@ -104,6 +104,10 @@ from .missions import (
     hub_and_spoke, shuttle,
 )
 from .mission_planner import MissionPlanner, MissionResult, LegResult
+from .mission_view import MissionPath, stitch_energy
+from .simplify import (
+    SimplifiedPath, min_link_profile, simplify_path, to_waypoint_table,
+)
 from .airspace import (
     ZoneType, AirspaceZone, AirspaceManager,
     PermissionClass as _PermissionClass,
@@ -184,6 +188,9 @@ __all__ = [
     "one_way", "out_and_back", "sample_collection", "supply_tour",
     "hub_and_spoke", "shuttle",
     "MissionPlanner", "MissionResult", "LegResult",
+    "MissionPath", "stitch_energy",
+    "SimplifiedPath", "simplify_path", "min_link_profile",
+    "to_waypoint_table",
     "ZoneType", "AirspaceZone", "AirspaceManager",
     "DEFAULT_PERMISSION", "DEFAULT_PERMIT_FAMILY",
     "CircularZone", "PolygonalZone",

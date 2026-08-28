@@ -70,8 +70,42 @@ every mission case and its settings in [`docs/CASES.md`](docs/CASES.md).
 - **`AStarResult` provided `get_waypoints_array` but not
   `get_waypoints`**, so profile figures silently rejected A* output —
   the exact comparison those figures exist to make.
+- **Figures re-analysed a whole mission at the departure payload.** An
+  out-and-back carries the cargo out and comes home empty, so the
+  battery panel and the results table disagreed by 8 % on a two-leg
+  round trip. Mission-level energy is now stitched from the planner's
+  own per-leg results (`stitch_energy`).
+- **Every leg after the first was analysed from a full pack.**
+  `analyze_path_energy` takes `SOC_initial` and the planner never
+  passed it, so leg 3 of a supply tour was modelled at 4.2 V per cell
+  and the state-of-charge trace jumped back to 100 % at each stop.
+  Terminal voltage sets the current, so later legs were reported
+  cooler and cheaper than they are.
+- **The path simplifier could emit a tidy route through the ceiling.**
+  Where the AGL band is tighter than the airframe's climb limit no
+  straight segment fits, and the fallback invented an altitude — 145 m
+  AGL against a 122 m ceiling, reported as a success. It now falls back
+  to the altitude actually flown, so every emitted waypoint is inside
+  the band or a point the aircraft already reached.
 
 ### Added
+
+- **`raptor/simplify.py` — optimised profiles turned into flight
+  plans.** A post-processing pass that redraws a leg's altitude profile
+  as the fewest straight segments that fit inside the 60–122 m AGL
+  tube, respecting the aircraft's own climb and descent limits, and
+  reports what the tidying cost in energy rather than assuming it is
+  free. On the VA17's Espejo→Suárez leg: 28 vertical manoeuvres to 8,
+  thirteen waypoints, +7 % cruise energy. It sits *beside* the flown
+  path — every compliance and energy number is still measured on what
+  the aircraft flies.
+- **Numbered waypoints across every view.** The same number means the
+  same point in the map, altitude, height-above-ground, lateral-offset
+  and three-dimensional panels, and in the exported `waypoints.csv`.
+- **`examples/PAPER/` — the production run.** Eight case scripts, each
+  sweeping three aircraft × two payload modes × three mission drivers,
+  plus `compare_all.py` for the cross-case figures. Output is
+  git-ignored and regenerable.
 
 - **A measured open-circuit-voltage curve** for a high-nickel NMC 21700,
   extracted from a CC BY 4.0 dataset (Samsung INR21700-30T at C/30,

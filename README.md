@@ -505,9 +505,24 @@ python -m scripts.import_zones_ecuador \
 
 ## Figures
 
-Two scripts. `make_figures` draws the **network** — every corridor, the
-airspace, the atlas — and there is one of each. `make_case_figures`
-draws a **flight**, and there is one of each per case and per pair:
+Three entry points. `make_figures` draws the **network** — every
+corridor, the airspace, the atlas — and there is one of each.
+`make_case_figures` draws a **flight**, and there is one of each per
+case and per pair. `examples/PAPER/` is the **production run** behind
+the paper: one script per case, each sweeping three aircraft, two
+payload modes and three mission drivers.
+
+```bash
+python examples/PAPER/case1_workhorse.py     # one case, full effort
+python examples/PAPER/compare_all.py         # cross-case, after all eight
+```
+
+Each case also writes `waypoints.csv` — the optimised leg redrawn as
+the fewest straight segments that fit inside the 60–122 m AGL band,
+numbered, and the numbers are the same numbers drawn on every panel of
+every figure for that route. That file is the one a ground station
+gets; the dense flown path stays the one every energy and compliance
+number is computed on.
 
 ```bash
 python -m scripts.make_figures --out figures/current

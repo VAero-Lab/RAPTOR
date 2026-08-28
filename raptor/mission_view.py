@@ -19,6 +19,7 @@ Author: Victor (LUAS-EPN / KU Leuven)
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import List, Sequence
 
 import numpy as np
@@ -104,3 +105,76 @@ class MissionPath:
 
     def __len__(self) -> int:
         return len(self.legs)
+
+
+def stitch_energy(leg_results):
+    """
+    One mission-wide energy result from a sequence of per-leg results.
+
+    Why this exists rather than re-analysing the concatenated path:
+    re-analysis has to be told *a* payload, and a mission does not have
+    one. An out-and-back carries the cargo out and comes home empty; a
+    supply tour sheds a box at every stop. Re-analysing the whole path
+    at the departure payload charges the aircraft for cargo it already
+    delivered, and the figure then disagrees with the planner's own
+    headline number — by 8 % on a two-leg round trip, which is more than
+    most of the effects the figures exist to show.
+
+    The planner already analysed each leg at that leg's payload and with
+    that leg's starting state of charge. Concatenating those results
+    keeps the figures and the numbers the same arithmetic.
+
+    Parameters
+    ----------
+    leg_results : sequence of LegResult
+        In flight order.
+
+    Returns
+    -------
+    MissionEnergyResult
+        Timeline and segments in mission time; scalars summed, or taken
+        from the last leg where that is what they mean.
+    """
+    from .energy import MissionEnergyResult
+
+    segments, timeline = [], []
+    t_offset = 0.0
+    wh_offset = 0.0
+    mah_offset = 0.0
+    for lr in leg_results:
+        er = lr.energy_result
+        segments.extend(er.segments)
+        for st in er.battery_timeline:
+            timeline.append(replace(st, time=st.time + t_offset,
+                                    energy_consumed_wh=st.energy_consumed_wh
+                                    + wh_offset,
+                                    mah_consumed=st.mah_consumed + mah_offset))
+        t_offset += er.total_time
+        wh_offset += er.total_energy_wh
+        mah_offset += er.total_mah_consumed
+
+    last = leg_results[-1].energy_result
+    return MissionEnergyResult(
+        segments=segments,
+        total_energy_wh=sum(lr.energy_result.total_energy_wh
+                            for lr in leg_results),
+        total_energy_j=sum(lr.energy_result.total_energy_j
+                           for lr in leg_results),
+        total_mah_consumed=mah_offset,
+        total_time=t_offset,
+        SOC_final=last.SOC_final,
+        percent_remaining=last.percent_remaining,
+        mah_remaining=last.mah_remaining,
+        feasible=all(lr.energy_result.feasible for lr in leg_results),
+        min_SOC=min(lr.energy_result.min_SOC for lr in leg_results),
+        battery_timeline=timeline,
+        energy_from_cells_wh=sum(lr.energy_result.energy_from_cells_wh
+                                 for lr in leg_results),
+        ohmic_loss_wh=sum(lr.energy_result.ohmic_loss_wh
+                          for lr in leg_results),
+        max_c_rate=max(lr.energy_result.max_c_rate for lr in leg_results),
+        c_rate_exceeded=any(lr.energy_result.c_rate_exceeded
+                            for lr in leg_results),
+        power_limited=any(lr.energy_result.power_limited
+                          for lr in leg_results),
+    )

@@ -24,7 +24,9 @@ Author: Victor (LUAS-EPN / KU Leuven)
 """
 
 from __future__ import annotations
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, TYPE_CHECKING
+if TYPE_CHECKING:
+    from .routed_path import RoutedPath
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
