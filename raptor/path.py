@@ -297,6 +297,25 @@ class FlightPath:
         arrays = [seg.waypoints for seg in self._segments]
         return np.vstack(arrays) if arrays else np.empty((0, 5))
 
+    @property
+    def operator_waypoints(self) -> np.ndarray:
+        """
+        The discrete segment boundaries (the waypoints a human operator sees),
+        omitting the dense interpolation points used for terrain collision checking.
+
+        Returns ndarray of shape (N, 5): [lat, lon, alt, time, distance]
+        """
+        if not self._segments:
+            return np.empty((0, 5))
+        
+        states = [s.start_state for s in self._segments]
+        states.append(self._segments[-1].end_state)
+        
+        arr = []
+        for s in states:
+            arr.append([s.lat, s.lon, s.alt, s.time, s.distance])
+        return np.array(arr, dtype=float)
+
     # ── Path metrics ─────────────────────────────────────────────────────
 
     @property

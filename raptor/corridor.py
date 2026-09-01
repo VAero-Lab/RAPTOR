@@ -174,7 +174,9 @@ def climb_limited_envelope(
 def _simplify(distances: np.ndarray, altitudes: np.ndarray,
               tol_m: float, max_points: int,
               max_dip_m: float = 0.0,
-              tol_cap_m: float = None) -> Tuple[np.ndarray, np.ndarray]:
+              tol_cap_m: float = None,
+              floor: np.ndarray = None, ceiling: np.ndarray = None,
+              tan_climb: float = None, tan_desc: float = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Reduce a dense profile to breakpoints, without ever flying lower.
 
@@ -265,6 +267,42 @@ def _simplify(distances: np.ndarray, altitudes: np.ndarray,
         if worst < 0.05:
             break
 
+    # ── Greedy point reduction ────────────────────────────────────────
+    if floor is not None and ceiling is not None and tan_climb is not None and tan_desc is not None:
+        changed = True
+        while changed and len(bp_d) > 2:
+            changed = False
+            for k in range(1, len(bp_d) - 1):
+                d0, d2 = bp_d[k - 1], bp_d[k + 1]
+                a0, a2 = bp_a[k - 1], bp_a[k + 1]
+                
+                span = d2 - d0
+                if span <= 0:
+                    continue
+                
+                slope = (a2 - a0) / span
+                if slope > 0 and slope > tan_climb:
+                    continue
+                if slope < 0 and -slope > tan_desc:
+                    continue
+                    
+                lo = int(np.searchsorted(distances, d0, side="left"))
+                hi = int(np.searchsorted(distances, d2, side="right"))
+                
+                if hi - lo < 2:
+                    continue
+                    
+                t = (distances[lo:hi] - d0) / span
+                chord = a0 + t * (a2 - a0)
+                
+                if np.any(chord < floor[lo:hi]) or np.any(chord > ceiling[lo:hi]):
+                    continue
+                    
+                bp_d = np.delete(bp_d, k)
+                bp_a = np.delete(bp_a, k)
+                changed = True
+                break
+
     return bp_d, bp_a
 
 
@@ -275,6 +313,7 @@ def build_corridor_profile(
     target_agl: float,
     max_climb_angle_deg: float,
     max_descent_angle_deg: float,
+    min_clearance: float = 30.0,
     max_agl: float = 122.0,
     sample_spacing_m: float = None,
     simplify_tol_m: float = 6.0,
@@ -367,8 +406,14 @@ def build_corridor_profile(
     # height and the ceiling: an error larger than the corridor is tall
     # cannot be absorbed by the corridor.
     headroom = max(float(max_agl) - float(target_agl), 5.0)
+    
+    floor_arr = terr + float(min_clearance)
+    ceiling_arr = terr + float(max_agl)
+    
     bp_d, bp_a = _simplify(d, ref, simplify_tol_m, max_breakpoints,
-                           tol_cap_m=headroom)
+                           tol_cap_m=headroom,
+                           floor=floor_arr, ceiling=ceiling_arr,
+                           tan_climb=tan_climb, tan_desc=tan_desc)
 
     # Everything below is measured on the polyline the aircraft actually
     # flies, not on the dense reference it was simplified from. Those are

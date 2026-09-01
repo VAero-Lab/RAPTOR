@@ -43,6 +43,11 @@ C_FLOOR = "#EF6C00"
 C_FREE = "#2E7D32"
 C_PERMIT = "#F9A825"
 C_PROHIBITED = "#C62828"
+
+C_STRAIGHT = "#FF9800" # Orange for Straight line
+C_ASTAR = "#4CAF50"    # Green for A*
+C_TERRAIN_PATH = "#00BCD4" # Cyan for Terrain following
+
 #: The simplified, flight-plannable path — distinct from every route
 #: colour so it never reads as one more method.
 C_SIMPLE = "#212121"
@@ -265,82 +270,89 @@ def plot_altitude_profile(paths, labels, dem, ax=None, title: str = None,
                           number_waypoints: bool = True):
     """
     Altitude above sea level against distance flown — the side view.
-
-    The companion the AGL panel cannot replace. Height above ground
-    answers the regulatory question and is the *wrong* frame for
-    picturing a flight: a constant-altitude cruise appears in it as an
-    inverted terrain profile, which reads as violent manoeuvring when
-    the aircraft is holding one number.
-
-    This panel plots what the aircraft is actually doing. Put beside a
-    plan view on the same distance axis, the two together reconstruct
-    the flight: the map says where, this says how high.
-
-    Parameters
-    ----------
-    show_terrain : bool
-        Fill the ground under the first path's track. With several
-        routes the terrain differs beneath each, so only the first is
-        drawn and it is labelled as such.
-    show_band : tuple, optional
-        ``(floor, ceiling)`` in metres AGL, drawn as a ribbon following
-        the first path's terrain.
     """
     plt = _mpl()
     if ax is None:
         _, ax = plt.subplots(figsize=(9.0, 3.4))
 
     cmap = plt.get_cmap("tab10")
-    first_terrain = None
+    
+    # Pre-process paths to compute mean altitude for depth-sorting
+    path_data = []
     for i, (p, label) in enumerate(zip(paths, labels)):
         dist_km, alts, terrain, _, _ = _sample_path(p, dem)
-        if i == 0:
-            first_terrain = (dist_km, terrain)
-        ax.plot(dist_km, alts, lw=1.8, color=cmap(i % 10), zorder=5,
-                label=label)
+        mean_alt = float(np.nanmean(alts)) if len(alts) else 0.0
+        path_data.append({
+            "index": i,
+            "dist_km": dist_km,
+            "alts": alts,
+            "terrain": terrain,
+            "label": label,
+            "mean_alt": mean_alt,
+            "color": cmap(i % 10)
+        })
+        
+    # Sort paths from highest to lowest altitude so highest is drawn first (at the back)
+    path_data.sort(key=lambda x: x["mean_alt"], reverse=True)
+    
+    # Calculate global min/max for y-axis limits
+    all_terrains = np.concatenate([pd["terrain"] for pd in path_data if len(pd["terrain"]) > 0])
+    good_all = np.isfinite(all_terrains)
+    lo = float(np.nanmin(all_terrains[good_all])) if good_all.any() else 0.0
+    pad_bottom = lo - 0.15 * (float(np.nanmax(all_terrains[good_all])) - lo + 50) if good_all.any() else 0.0
+
+    for i, pd in enumerate(path_data):
+        dist_km = pd["dist_km"]
+        alts = pd["alts"]
+        terrain = pd["terrain"]
+        label = pd["label"]
+        color = pd["color"]
+        
+        # Determine zorder based on sorted index (0 is highest, so lowest zorder)
+        # Base zorder for terrain fills is 1, so we do 1 + (len(paths) - i)
+        # Actually, higher zorder is in front. So i=0 (highest alt) gets lowest zorder.
+        z_fill = 1 + i
+        z_line = 10 + i
+        
+        good = np.isfinite(terrain)
+        if show_terrain and good.any():
+            # Filled region for terrain, no solid boundary line
+            ax.fill_between(dist_km[good], terrain[good], pad_bottom,
+                            color=color, alpha=0.3, zorder=z_fill, lw=0)
+            
+            if show_band:
+                floor, ceiling = show_band
+                # Dashed lines for legal band, matching the path color
+                ax.plot(dist_km[good], terrain[good] + ceiling, color=color, 
+                        ls="--", lw=1.2, alpha=0.6, zorder=z_line-1)
+                ax.plot(dist_km[good], terrain[good] + floor, color=color, 
+                        ls="--", lw=1.2, alpha=0.6, zorder=z_line-1)
+
+        # Plot the actual flight profile
+        ax.plot(dist_km, alts, lw=2.2, color=color, zorder=z_line, label=label)
 
     if simplified is not None:
         wp = np.asarray(simplified.get_waypoints_array(), float)
         ax.plot(wp[:, 4] / 1000.0, wp[:, 2], lw=2.2, color=C_SIMPLE,
-                zorder=8, solid_capstyle="round",
+                zorder=20, solid_capstyle="round",
                 label=f"simplified — {simplified.n_after} manoeuvres, "
                       f"{len(wp)} waypoints")
         if number_waypoints:
             draw_numbered(ax, wp[:, 4] / 1000.0, wp[:, 2], C_SIMPLE)
 
-    if show_terrain and first_terrain is not None:
-        d, terr = first_terrain
-        good = np.isfinite(terr)
-        lo = float(np.nanmin(terr[good]))
-        ax.fill_between(d[good], terr[good], lo - 0.15 * (np.nanmax(terr[good]) - lo + 50),
-                        color=C_TERRAIN_FILL, zorder=1, lw=0)
-        ax.plot(d[good], terr[good], color=C_TERRAIN, lw=1.1, zorder=2,
-                label="terrain under the first route")
-        if show_band:
-            floor, ceiling = show_band
-            ax.fill_between(d[good], terr[good] + floor, terr[good] + ceiling,
-                            color=C_BAND, alpha=0.28, lw=0, zorder=2,
-                            label=f"legal band, {floor:.0f}–{ceiling:.0f} m AGL")
-        ax.set_ylim(bottom=lo - 0.15 * (np.nanmax(terr[good]) - lo + 50))
-
+    ax.set_ylim(bottom=pad_bottom)
     ax.set_xlabel("distance flown [km]")
     ax.set_ylabel("altitude [m AMSL]")
+    
     handles, names = ax.get_legend_handles_labels()
     if not route_legend:
-        # On a combined sheet the routes are already named on the map
-        # and in the panel below; repeating them here costs a third of
-        # the panel and covers the terrain the panel exists to show.
-        # The simplified path stays, because it is the only curve in
-        # this panel that is not in the others — and the match must be
-        # exact: a baseline called "terrain-following" is a route, and
-        # a prefix test let it through.
-        keep = [(h, n) for h, n in zip(handles, names)
-                if n == "terrain under the first route"
-                or n.startswith(("legal band", "simplified"))]
+        # On a combined sheet, hide the redundant labels
+        keep = [(h, n) for h, n in zip(handles, names) if n.startswith("simplified")]
         handles, names = ([h for h, _ in keep], [n for _, n in keep])
     if handles:
-        ax.legend(handles, names, fontsize=6.5, loc="lower left",
+        ax.legend(handles, names, fontsize=7, loc="lower left",
                   framealpha=0.93, ncol=2)
+    
     ax.spines[["top", "right"]].set_visible(False)
     if title:
         ax.set_title(title, fontsize=10, fontweight="bold")
@@ -607,7 +619,7 @@ def plot_plan_view(paths, labels, dem, ax=None, bbox=None, airspace=None,
     ax.set_aspect(1.0 / max(np.cos(np.radians(0.5 * (bbox[0] + bbox[1]))), 1e-6))
     ax.set_xlabel("longitude")
     ax.set_ylabel("latitude")
-    ax.legend(fontsize=7, loc="best", framealpha=0.92)
+    ax.legend(fontsize=7, loc="best", frameon=False)
     if title:
         ax.set_title(title, fontsize=10, fontweight="bold")
     return ax
@@ -680,41 +692,23 @@ def plot_plan_and_profile(paths, labels, dem, constraints, airspace=None,
                           context=None, waypoints=None, suptitle: str = None,
                           endpoint_names=None, simplified=None,
                           number_waypoints: bool = True,
-                          figsize=(19.0, 11.5)):
+                          figsize=(19.0, 6.5)):
     """
     A route in every view needed to reconstruct it, on one page.
 
-    Four panels. The map says where the aircraft goes and what it
-    threads. The three profiles beside it say, at the same distance
-    flown:
-
-    * **altitude AMSL** — what the aircraft is actually doing. Read with
-      the map, this is the flight path.
-    * **height AGL** — whether it is allowed to be there.
-    * **lateral offset** — what the avoidance cost in distance.
-
-    All three share one x-axis, and that axis is *distance flown by each
-    route*. The deviation panel used to be drawn against distance along
-    the direct line instead, which is a different and shorter axis — a
-    detour is longer than the line it leaves — so a reader lining the
-    panels up vertically was comparing points that are not the same
-    point. Routes now end at different x, which is honest: they are
-    different lengths.
+    Two panels. The map says where the aircraft goes and what it
+    threads. The profile beside it says, at the same distance flown:
+    * **altitude AMSL** — what the aircraft is actually doing.
     """
     plt = _mpl()
     fig = plt.figure(figsize=figsize)
-    # Room on the right for the profile legends, which are moved out of
-    # the axes below. With four baselines, several legs and the
-    # simplified path there are seven or eight curves per panel, and a
-    # legend inside the frame lands on the data every time.
-    gs = fig.add_gridspec(3, 2, width_ratios=[1.15, 1.0],
-                          height_ratios=[1, 1, 1], hspace=0.16, wspace=0.16,
-                          left=0.045, right=0.79, top=0.92, bottom=0.06)
+    
+    gs = fig.add_gridspec(1, 2, width_ratios=[1.15, 1.0],
+                          wspace=0.16,
+                          left=0.045, right=0.79, top=0.88, bottom=0.12)
 
-    ax_map = fig.add_subplot(gs[:, 0])
+    ax_map = fig.add_subplot(gs[0, 0])
     ax_alt = fig.add_subplot(gs[0, 1])
-    ax_agl = fig.add_subplot(gs[1, 1], sharex=ax_alt)
-    ax_dev = fig.add_subplot(gs[2, 1], sharex=ax_alt)
 
     plot_plan_view(paths, labels, dem, ax=ax_map, airspace=airspace,
                    context=context, waypoints=waypoints,
@@ -725,22 +719,11 @@ def plot_plan_and_profile(paths, labels, dem, constraints, airspace=None,
                           simplified=simplified,
                           number_waypoints=number_waypoints,
                           title="Altitude — what the aircraft is doing")
-    plot_agl_overlay(paths, labels, dem, constraints, ax=ax_agl,
-                     simplified=simplified,
-                     number_waypoints=number_waypoints,
-                     title="Height above ground — whether it is allowed")
-    plot_lateral_deviation(paths, labels, ax=ax_dev, x_mode="flown",
-                           simplified=simplified,
-                           number_waypoints=number_waypoints,
-                           title="Offset from the direct line")
 
-    for ax in (ax_alt, ax_agl):
-        ax.set_xlabel("")
-        ax.tick_params(labelbottom=False)
-    ax_dev.set_xlabel("distance flown [km]")
+    ax_alt.set_xlabel("distance flown [km]")
 
     # Legends out to the right, each beside the panel it belongs to.
-    for ax in (ax_alt, ax_agl, ax_dev):
+    for ax in (ax_alt, ):
         old = ax.get_legend()
         if old is None:
             continue
@@ -1503,135 +1486,88 @@ PHASE_COLOUR = {
 }
 
 
-def plot_battery_timeline(energy_result, ac, fig=None, suptitle: str = None,
-                          figsize=(13.0, 9.0), soc_reserve: float = 0.15):
+def plot_battery_comparison(energy_results_with_labels: list, ac, fig=None, suptitle: str = None,
+                              figsize=(13.0, 7.0), soc_reserve: float = 0.15, leg_transition_times: list = None):
     """
-    What the pack does over a flight, and where the energy went.
-
-    Four stacked panels on one time axis, with the flight phases shaded
-    behind all of them:
-
-    * **state of charge**, against the reserve the mission is planned to
-    * **terminal voltage**, which is not a restatement of SOC — it sags
-      under load and recovers, and it is what a low-voltage cutout
-      actually watches
-    * **pack current**, against the pack's own limit, where the hover
-      phases show themselves
-    * **cumulative energy**, split into what reached the drivetrain and
-      what became heat in the pack
-
-    The phase shading is the point of putting them together: on a VTOL
-    the two shortest phases are the two most expensive, and no single
-    panel shows that.
+    Compare battery consumption (Energy and SOC) across multiple path strategies.
+    
+    Uses a double y-axis:
+    - Left axis: State of Charge [%] (solid line)
+    - Right axis: Cumulative Energy [Wh] (filled region)
+    
+    The filled energy regions are depth-sorted (highest energy in back, lowest in front)
+    so no area is hidden. Colors match the altitude profiles.
     """
     plt = _mpl()
     if fig is None:
         fig = plt.figure(figsize=figsize)
-    axes = fig.subplots(4, 1, sharex=True,
-                        gridspec_kw=dict(hspace=0.12,
-                                         height_ratios=[1.1, 1, 1, 1.1]))
-
-    tl = list(energy_result.battery_timeline)
-    t = np.array([s.time for s in tl]) / 60.0
-    soc = np.array([s.SOC for s in tl]) * 100.0
-    volt = np.array([s.voltage for s in tl])
-    amps = np.array([s.current_draw for s in tl])
-    wh = np.array([s.energy_consumed_wh for s in tl])
-
-    # Phase bands. Consecutive segments of the same type are merged
-    # first, and slivers are left unshaded: a terrain-following leg is
-    # forty alternating climbs and descents, and shading each one turns
-    # the background into a uniform wash that hides exactly the two
-    # blocks — the rotor-borne phases — the panel exists to point at.
-    runs, t0 = [], 0.0
-    for seg in energy_result.segments:
-        t1 = t0 + seg.duration / 60.0
-        if runs and runs[-1][0] == seg.segment_type:
-            runs[-1][2] = t1
-        else:
-            runs.append([seg.segment_type, t0, t1])
-        t0 = t1
-    total_min = max(t0, 1e-9)
-    # The rotor-borne phases are always shaded however short they are.
-    # They are the shortest blocks on the clock and the most expensive
-    # on the battery, which is the whole reason for the panel; filtering
-    # them out by duration would remove the finding.
-    ALWAYS = {"VTOL_ASCEND", "VTOL_DESCEND", "TRANSITION"}
-    seen = set()
-    for kind, a, b in runs:
-        if kind not in ALWAYS and (b - a) / total_min < 0.015:
-            continue
-        c = PHASE_COLOUR.get(kind, "0.7")
-        for ax in axes:
-            ax.axvspan(a, b, color=c, alpha=0.16, lw=0, zorder=0)
-        seen.add(kind)
-
-    axes[0].plot(t, soc, lw=1.9, color=C_PATH, label="state of charge")
-    axes[0].axhline(100 * soc_reserve, color=C_BUST, ls="--", lw=1.1)
-    axes[0].annotate(f"reserve {100*soc_reserve:.0f} %", xy=(0.995, 100*soc_reserve),
-                     xycoords=("axes fraction", "data"), ha="right",
-                     va="bottom", fontsize=7, color=C_BUST)
-    axes[0].set_ylabel("SOC [%]")
-    axes[0].set_ylim(0, 105)
-    axes[0].legend(fontsize=7, loc="lower left", framealpha=0.92)
-
-    axes[1].plot(t, volt, lw=1.6, color="#6A1B9A", label="terminal voltage")
-    n_cells = max(ac.battery_cells_series, 1)
-    try:
-        from .battery import CELL_CHEMISTRY
-        cut = CELL_CHEMISTRY[ac.cell_chemistry]["v_cutoff"] * n_cells
-        axes[1].axhline(cut, color=C_BUST, ls="--", lw=1.1)
-        axes[1].annotate(f"cell cut-off ({cut:.0f} V)", xy=(0.015, cut),
-                         xycoords=("axes fraction", "data"), ha="left",
-                         va="bottom", fontsize=7, color=C_BUST)
-        # The cut-off is far below anything a flight reaches, so pinning
-        # the axis to it wastes the panel. Frame the data and let the
-        # line sit at the edge as a reference.
-        lo = float(np.nanmin(volt))
-        axes[1].set_ylim(min(cut - 1.0, lo - 2.0), float(np.nanmax(volt)) + 1.5)
-    except Exception:
-        pass
-    axes[1].set_ylabel("pack voltage [V]")
-    axes[1].legend(fontsize=7, loc="lower left", framealpha=0.92)
-
-    # Current in amps only. The C-rate that used to share this panel is
-    # the same curve divided by a constant, so the twin axis added a
-    # second scale and no second fact; the pack's own current limit is
-    # drawn instead, which is what the amps have to be read against.
-    axes[2].plot(t, amps, lw=1.6, color="#EF6C00",
-                 label="pack current")
-    i_lim = ac.battery_max_c_rate * ac.battery_capacity_ah
-    if np.isfinite(i_lim) and i_lim > 0:
-        axes[2].axhline(i_lim, color=C_BUST, ls="--", lw=1.0,
-                        label=f"pack limit {i_lim:.0f} A "
-                              f"({ac.battery_max_c_rate:.0f} C)")
-        axes[2].set_ylim(0, max(i_lim * 1.12, float(np.nanmax(amps)) * 1.2))
-    axes[2].set_ylabel("current [A]")
-    axes[2].legend(fontsize=7, loc="upper right", framealpha=0.92)
-
-    axes[3].plot(t, wh, lw=1.8, color=C_PATH, label="to the drivetrain")
-    axes[3].fill_between(t, 0, wh, color=C_PATH, alpha=0.12, lw=0)
-    axes[3].set_ylabel("energy [Wh]")
-    axes[3].set_xlabel("time [min]")
-    axes[3].annotate(
-        f"{energy_result.total_energy_wh:.1f} Wh delivered, "
-        f"{energy_result.ohmic_loss_wh:.1f} Wh ({100*energy_result.ohmic_loss_wh/max(energy_result.energy_from_cells_wh,1e-9):.1f} %) "
-        f"lost as heat in the pack",
-        xy=(0.02, 0.9), xycoords="axes fraction", fontsize=7.5, color="0.25")
-    axes[3].legend(fontsize=7, loc="center left", framealpha=0.92)
-
-    for ax in axes:
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.margins(x=0)
-
-    handles = [plt.Line2D([], [], marker="s", ls="", markersize=8,
-                          markerfacecolor=PHASE_COLOUR[k], alpha=0.45,
-                          markeredgecolor="none", label=k.replace("_", " ").lower())
-               for k in PHASE_COLOUR if k in seen]
-    fig.legend(handles=handles, loc="lower center", ncol=len(handles),
-               fontsize=7.5, frameon=False, bbox_to_anchor=(0.5, -0.005))
+    
+    ax_soc = fig.add_subplot(111)
+    ax_energy = ax_soc.twinx()
+    
+    # Sort the results by total energy consumed (descending) to depth-sort the fills
+    sorted_results = sorted(energy_results_with_labels, key=lambda x: x[1].total_energy_wh, reverse=True)
+    
+    for label, er in sorted_results:
+        # Determine color based on label (matching altitude plots)
+        color = C_PATH  # Default
+        label_lower = label.lower()
+        if "straight" in label_lower:
+            color = C_STRAIGHT
+        elif "terrain" in label_lower:
+            color = C_TERRAIN
+        elif "a*" in label_lower or "grid" in label_lower:
+            color = C_ASTAR
+            
+        tl = list(er.battery_timeline)
+        t = np.array([s.time for s in tl]) / 60.0
+        soc = np.array([s.SOC for s in tl]) * 100.0
+        wh = np.array([s.energy_consumed_wh for s in tl])
+        
+        # Plot Energy (filled region, right axis)
+        # Depth sorting works because we process highest energy first (zorder defaults)
+        ax_energy.fill_between(t, 0, wh, color=color, alpha=0.3, lw=0, label=f"{label} (Energy)")
+        
+        # Plot SOC (solid line, left axis)
+        ax_soc.plot(t, soc, lw=2.2, color=color, label=f"{label} (SOC)")
+    
+    # Reserve line on SOC axis
+    ax_soc.axhline(100 * soc_reserve, color=C_BUST, ls="--", lw=1.2)
+    ax_soc.annotate(f"reserve {100*soc_reserve:.0f} %", xy=(0.995, 100*soc_reserve),
+                    xycoords=("axes fraction", "data"), ha="right",
+                    va="bottom", fontsize=9, color=C_BUST)
+    
+    # Add vertical lines for leg transitions
+    if leg_transition_times:
+        for i, leg_t in enumerate(leg_transition_times):
+            ax_soc.axvline(leg_t, color="gray", ls="--", lw=1.5, alpha=0.7)
+            ax_soc.annotate(f"Leg {i+2} starts", xy=(leg_t, 105), xycoords=("data", "data"),
+                            ha="center", va="bottom", fontsize=9, color="gray",
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.8))
+    
+    ax_soc.set_xlabel("time [min]", fontsize=11)
+    ax_soc.set_ylabel("SOC [%]", fontsize=11)
+    ax_soc.set_ylim(0, 110) # extra space for annotation
+    
+    ax_energy.set_ylabel("cumulative energy [Wh]", fontsize=11)
+    ax_energy.set_ylim(bottom=0)
+    
+    # Clean up spines
+    ax_soc.spines["top"].set_visible(False)
+    ax_energy.spines["top"].set_visible(False)
+    ax_soc.margins(x=0)
+    ax_energy.margins(x=0)
+    
+    # Legends
+    lines_soc, labels_soc = ax_soc.get_legend_handles_labels()
+    lines_energy, labels_energy = ax_energy.get_legend_handles_labels()
+    ax_soc.legend(lines_soc + lines_energy, labels_soc + labels_energy, 
+                  loc="center left", fontsize=9, framealpha=0.92, bbox_to_anchor=(1.08, 0.5))
+    
     if suptitle:
-        fig.suptitle(suptitle, fontsize=12, fontweight="bold")
+        fig.suptitle(suptitle, fontsize=13, fontweight="bold")
+    
+    fig.tight_layout()
     return fig
 
 
@@ -1645,9 +1581,17 @@ def plot_energy_breakdown(energy_result, ax=None, title: str = None):
     of the battery, and that ratio is what makes every extra stop in a
     multi-stop mission expensive.
     """
+def plot_energy_breakdown(energy_result, ax=None, title: str = None):
+    """
+    Where the energy went, by flight phase, against where the time went.
+
+    Plotted as a radar (spider) plot to instantly show the intensity gap
+    between energy consumption and time spent.
+    """
     plt = _mpl()
     if ax is None:
-        _, ax = plt.subplots(figsize=(8.0, 3.4))
+        fig = plt.figure(figsize=(8.0, 8.0))
+        ax = fig.add_subplot(111, projection="polar")
 
     by = {}
     for seg in energy_result.segments:
@@ -1658,31 +1602,59 @@ def plot_energy_breakdown(energy_result, ax=None, title: str = None):
     order = [k for k in PHASE_COLOUR if k in by]
     e_tot = sum(v[0] for v in by.values()) or 1.0
     t_tot = sum(v[1] for v in by.values()) or 1.0
-    x = np.arange(len(order))
+    
     e_share = [100 * by[k][0] / e_tot for k in order]
     t_share = [100 * by[k][1] / t_tot for k in order]
 
-    ax.bar(x - 0.2, e_share, width=0.4, label="share of energy",
-           color=[PHASE_COLOUR[k] for k in order])
-    ax.bar(x + 0.2, t_share, width=0.4, label="share of time",
-           color=[PHASE_COLOUR[k] for k in order], alpha=0.42)
-    for xi, (e, tm) in enumerate(zip(e_share, t_share)):
-        if tm > 0.5:
-            ax.annotate(f"×{e/tm:.1f}", (xi, max(e, tm) + 1.5), ha="center",
-                        fontsize=7, color="0.3")
+    # Calculate angles for the radar chart (and close the loop)
+    N = len(order)
+    angles = [n / float(N) * 2 * np.pi for n in range(N)]
+    angles += angles[:1]
+    
+    e_share += e_share[:1]
+    t_share += t_share[:1]
 
-    ax.set_xticks(x)
-    ax.set_xticklabels([k.replace("_", "\n").lower() for k in order],
-                       fontsize=7.5)
-    ax.set_ylabel("share of mission [%]")
-    ax.legend(fontsize=7.5)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.annotate("×n is energy share divided by time share — above 1 the "
-                "phase costs more than its share of the clock",
-                xy=(0.5, -0.30), xycoords="axes fraction", ha="center",
-                fontsize=7, color="0.4")
+    # Draw the radar chart
+    ax.set_theta_offset(np.pi / 2)  # Start from top
+    ax.set_theta_direction(-1)      # Clockwise
+    
+    # Draw axes labels
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels([k.replace("_", "\n").lower() for k in order], fontsize=8, fontweight="bold")
+    
+    # Draw y labels
+    ax.set_rlabel_position(0)
+    
+    # Determine the maximum value for the radial axis
+    max_val = max(max(e_share), max(t_share))
+    # Create ticks every 20%, up to the next multiple of 20 above max_val
+    tick_max = int(np.ceil(max_val / 20.0)) * 20
+    ticks = np.arange(20, tick_max + 1, 20)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([f"{t}%" for t in ticks], color="grey", size=7)
+    ax.set_ylim(0, tick_max)
+
+    # Plot Energy Share
+    ax.plot(angles, e_share, linewidth=2, linestyle='solid', label="Energy Share", color=C_PATH)
+    ax.fill(angles, e_share, color=C_PATH, alpha=0.25)
+    
+    # Plot Time Share
+    ax.plot(angles, t_share, linewidth=1.5, linestyle='--', label="Time Share", color=C_BUST)
+    ax.fill(angles, t_share, color=C_BUST, alpha=0.1)
+
+    # Add multipliers for intensity (Energy / Time)
+    for i, (e, tm) in enumerate(zip(e_share[:-1], t_share[:-1])):
+        if tm > 0.5:
+            intensity = e / tm
+            if intensity > 1.0:
+                ax.text(angles[i], max(e, tm) + 5, f"×{intensity:.1f}", 
+                        horizontalalignment='center', size=8, color="0.2", weight="bold")
+
+    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1), fontsize=8)
+    
     if title:
-        ax.set_title(title, fontsize=10, fontweight="bold")
+        ax.set_title(title, size=11, fontweight="bold", pad=20)
+        
     return ax
 
 
@@ -2039,19 +2011,14 @@ def plot_phase_comparison(runs, title: str = None, figsize=(12.5, 4.2)):
     aircraft.
     """
     plt = _mpl()
-    fig, axes = plt.subplots(1, len(runs), figsize=figsize, sharey=True)
-    if len(runs) == 1:
-        axes = [axes]
-    for ax, r in zip(axes, runs):
+    fig = plt.figure(figsize=figsize)
+    axes = []
+    
+    for i, r in enumerate(runs):
+        ax = fig.add_subplot(1, len(runs), i + 1, projection="polar")
+        axes.append(ax)
         plot_energy_breakdown(r["energy"], ax=ax, title=r["label"])
-        ax.set_ylabel("share of mission [%]" if ax is axes[0] else "")
-        for t in ax.texts:
-            if "energy share divided" in t.get_text():
-                t.remove()
-    axes[0].annotate("×n is energy share divided by time share — above 1 the "
-                     "phase costs more than its share of the clock",
-                     xy=(0.5, -0.34), xycoords="axes fraction", ha="center",
-                     fontsize=7, color="0.4")
+        
     if title:
         fig.suptitle(title, fontsize=12, fontweight="bold")
     fig.tight_layout(rect=(0, 0.04, 1, 0.93))

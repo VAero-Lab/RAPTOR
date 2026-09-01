@@ -170,24 +170,17 @@ class AStarGridPlanner:
         if n_nodes == 0:
             return AStarResult([], 0, 0, 0, 0, self.grid_res, self.n_alt, False)
 
-        # ── Find start and goal nodes ─────────────────────────────────
+        # ── Find start node ───────────────────────────────────────────
         # Start: closest node to origin
         start_key = min(nodes.keys(), key=lambda k: (k[0], abs(k[1] - n_lateral)))
-        # Goal: closest node to destination
-        goal_key = min(
-            [k for k in nodes.keys() if k[0] == n_along - 1],
-            key=lambda k: abs(k[1] - n_lateral),
-            default=None,
-        )
-        if goal_key is None:
-            return AStarResult([], 0, 0, 0, 0, self.grid_res, self.n_alt, False)
+        
+        goal_key = None
 
         # ── A* search ─────────────────────────────────────────────────
         def heuristic(key):
-            """Euclidean distance to goal node."""
+            """Euclidean distance to destination."""
             n = nodes[key]
-            g = nodes[goal_key]
-            return DEMInterface.haversine(n[0], n[1], g[0], g[1])
+            return DEMInterface.haversine(n[0], n[1], lat_d, lon_d)
 
         def edge_cost(k1, k2):
             """Physics-based energy cost between two nodes."""
@@ -204,8 +197,17 @@ class AStarGridPlanner:
             if alt_diff > 5:
                 gamma = np.degrees(np.arctan2(alt_diff, dist))
                 P = power_fw_climb(self.ac, V, gamma, alt_mid) / self.ac.eta_prop
+            elif alt_diff < -5:
+                from .energy import power_fw_descent
+                gamma = np.degrees(np.arctan2(alt_diff, dist))
+                P = power_fw_descent(self.ac, V, gamma, alt_mid) / self.ac.eta_prop
             else:
                 P = power_fw_cruise(self.ac, V, alt_mid) / self.ac.eta_prop
+
+            # Clamp power to >= 0 so A* edge cost never goes negative.
+            # (A* requires positive edge weights; negative cost breaks the search).
+            # Add avionics power as a baseline minimum consumption.
+            P = max(P, 0.0) + getattr(self.ac, "avionics_w", 0.0)
 
             t = dist / V  # seconds
             E_wh = P * t / 3600.0
@@ -236,18 +238,27 @@ class AStarGridPlanner:
         g_cost = {start_key: 0.0}
         came_from = {}
         expanded = 0
+        closed_set = set()
 
         while open_set:
             f, current = heapq.heappop(open_set)
+            
+            if current in closed_set:
+                continue
+            closed_set.add(current)
+            
             expanded += 1
 
-            if current == goal_key:
+            if current[0] == n_along - 1 and current[1] == n_lateral:
+                goal_key = current
                 break
 
-            if expanded > n_nodes * 3:
+            if expanded > n_nodes * 50:
                 break  # Safety limit
 
             for nbr in neighbors(current):
+                if nbr in closed_set:
+                    continue
                 new_g = g_cost[current] + edge_cost(current, nbr)
                 if nbr not in g_cost or new_g < g_cost[nbr]:
                     g_cost[nbr] = new_g

@@ -315,7 +315,7 @@ class RoutedPath:
         for _ in range(8):
             vtol_climb = max(total_climb * vtol_frac, 20.0)
             fw_climb = max(total_climb - vtol_climb - self.uav.vtol_transition_alt_change, 0)
-            dep_dist = self.uav.vtol_transition_distance
+            dep_dist = self.uav.vtol_transition_distance + self.uav.fw_min_transition_cruise_m
             if fw_climb > 10:
                 dep_dist += fw_climb / np.tan(np.radians(climb_angle))
             if dep_dist < leg_dists[0] * 0.7:
@@ -345,6 +345,10 @@ class RoutedPath:
             duration=self.uav.vtol_transition_duration,
             altitude_change=self.uav.vtol_transition_alt_change,
             ground_distance=self.uav.vtol_transition_distance,
+        ))
+        path.add_segment(FWCruise(
+            ground_distance=self.uav.fw_min_transition_cruise_m,
+            airspeed=self._cruise_airspeeds[0],
         ))
         if fw_climb_needed > 10:
             path.add_segment(FWClimb(
@@ -426,7 +430,7 @@ class RoutedPath:
                 for _ in range(8):
                     arr_vd = max(arr_descent * arr_vtol_frac, 20.0) if arr_descent > 10 else max(arr_descent, 20.0)
                     arr_fw = max(arr_descent - arr_vd - self.uav.vtol_transition_alt_change, 0)
-                    arr_reserve = self.uav.vtol_transition_distance
+                    arr_reserve = self.uav.vtol_transition_distance + self.uav.fw_min_transition_cruise_m
                     if arr_fw > 10:
                         arr_reserve += arr_fw / np.tan(np.radians(arr_angle))
 
@@ -467,6 +471,10 @@ class RoutedPath:
         else:
             vtol_desc = max(total_descent, 20.0)
 
+        path.add_segment(FWCruise(
+            ground_distance=self.uav.fw_min_transition_cruise_m,
+            airspeed=self._cruise_airspeeds[-1],
+        ))
         path.add_segment(Transition(
             duration=self.uav.vtol_transition_duration,
             altitude_change=-self.uav.vtol_transition_alt_change,
@@ -517,13 +525,16 @@ class RoutedPath:
         # ── Corridor profile for every sub-leg ────────────────────────
         profiles: List[CorridorProfile] = []
         for j in range(n_legs):
+            budget = max(2, int((leg_dists[j] / 1000.0) * self.constraints.max_maneuvers_per_km))
             profiles.append(build_corridor_profile(
                 self.dem,
                 wp_coords[j], wp_coords[j + 1],
                 target_agl=float(self._cruise_agls[j]),
                 max_climb_angle_deg=uav.fw_max_climb_angle,
                 max_descent_angle_deg=uav.fw_max_descent_angle,
+                min_clearance=self.constraints.terrain_clearance_for_segment("FW_CRUISE"),
                 max_agl=self.constraints.max_agl,
+                max_breakpoints=budget,
             ))
         self.leg_profiles = profiles
 
@@ -555,11 +566,11 @@ class RoutedPath:
         fw_climb = max(
             total_climb - vtol_climb - uav.vtol_transition_alt_change, 0.0
         )
-        dep_dist = uav.vtol_transition_distance
+        dep_dist = uav.vtol_transition_distance + uav.fw_min_transition_cruise_m
         # Steepen, then shift work into the VTOL phase, until the climb-out
         # fits comfortably inside the first leg.
         for _ in range(8):
-            dep_dist = uav.vtol_transition_distance
+            dep_dist = uav.vtol_transition_distance + uav.fw_min_transition_cruise_m
             if fw_climb > 10:
                 dep_dist += fw_climb / np.tan(np.radians(dep_angle))
             if dep_dist < leg_dists[0] * 0.5:
@@ -582,6 +593,10 @@ class RoutedPath:
             altitude_change=uav.vtol_transition_alt_change,
             ground_distance=uav.vtol_transition_distance,
         ), 0)
+        add(FWCruise(
+            ground_distance=uav.fw_min_transition_cruise_m,
+            airspeed=self._cruise_airspeeds[0],
+        ), 0)
         if fw_climb > 10:
             add(FWClimb(
                 altitude_gain=fw_climb,
@@ -601,7 +616,7 @@ class RoutedPath:
         last = profiles[-1]
         arr_angle = min(6.0, uav.fw_max_descent_angle * 0.5)
         arr_vtol_frac = self.vtol_fraction
-        arr_reserve = uav.vtol_transition_distance
+        arr_reserve = uav.vtol_transition_distance + uav.fw_min_transition_cruise_m
 
         for _ in range(8):
             handover = max(leg_dists[-1] - arr_reserve, 0.0)
@@ -612,7 +627,7 @@ class RoutedPath:
             arr_fw = max(
                 arr_descent - arr_vtol - uav.vtol_transition_alt_change, 0.0
             )
-            new_reserve = uav.vtol_transition_distance
+            new_reserve = uav.vtol_transition_distance + uav.fw_min_transition_cruise_m
             if arr_fw > 10:
                 new_reserve += arr_fw / np.tan(np.radians(arr_angle))
 
@@ -724,6 +739,10 @@ class RoutedPath:
 
         trans_drop = min(uav.vtol_transition_alt_change,
                          max(current_alt - self.destination.ground_elev, 0.0))
+        add(FWCruise(
+            ground_distance=uav.fw_min_transition_cruise_m,
+            airspeed=self._cruise_airspeeds[-1],
+        ), n_legs - 1)
         add(Transition(
             duration=uav.vtol_transition_duration,
             altitude_change=-trans_drop,

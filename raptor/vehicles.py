@@ -138,6 +138,22 @@ class AircraftEnergyParams:
     #: Efficiency of the cruise propulsor. ``None`` falls back to ``eta_prop``.
     eta_cruise: Optional[float] = 0.72
 
+    # --- System & Aerodynamic Penalties ---
+    avionics_power_w: float = 25.0
+    """Continuous electrical base load [W] for avionics and payload.
+    
+    Flight controllers, telemetry, servos, and active payloads draw continuous
+    power. A typical small UAV system draws 15-30 W minimum. Missing this
+    ignores a constant drain that adds up over a 60-minute mission."""
+    
+    k_downwash: float = 0.05
+    """VTOL hover download penalty fraction (0.0 to 1.0).
+    
+    In hover, the lift rotors blow high-velocity air onto the wings and fuselage,
+    creating a vertical drag (download) that the rotors must fight. For 
+    quadplanes, this typically costs 5-10% of total thrust (see e.g., NDARC 
+    documentation or general rotorcraft design texts)."""
+
     # --- Battery ---
     battery_mass: float = 5.058        # Battery mass [kg]
     specific_energy: float = 194.78

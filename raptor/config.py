@@ -88,6 +88,7 @@ class UAVConfig:
     vtol_transition_duration: float = 15.0 # s
     vtol_transition_distance: float = 150.0  # m horizontal
     vtol_transition_alt_change: float = 20.0 # m gained during transition
+    fw_min_transition_cruise_m: float = 50.0 # m horizontal straight flight for stabilization
 
     # --- Fixed-wing mode ---
     # These used to be typed in independently of the aerodynamics, and
@@ -410,6 +411,7 @@ class MissionConstraints:
     vtol_clearance_radius: float = 30.0          # m
     emergency_landing_alt_margin: float = 30.0   # m
     max_path_segments: int = 80
+    max_maneuvers_per_km: float = 0.3            # maneuvers per km of leg distance
 
     def terrain_clearance_for_segment(self, segment_type: str) -> float:
         """Return the applicable terrain clearance for a segment type."""

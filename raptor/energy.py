@@ -60,7 +60,9 @@ def power_vertical_ascent(ac: AircraftEnergyParams,
     for steady vertical climb approximation, which is conservative).
     """
     rho = isa_density(altitude)
-    T = ac.W  # Steady vertical ascent: T ≈ W (neglecting acceleration)
+    # Steady vertical ascent: T = W + download penalty
+    k_dw = getattr(ac, 'k_downwash', 0.0)
+    T = ac.W / (1.0 - k_dw)
 
     # Climb power — the work done raising the weight
     P_c = T * V_y
@@ -94,7 +96,8 @@ def power_hover(ac: AircraftEnergyParams,
     v_h = √(T / 2ρA).
     """
     rho = isa_density(altitude)
-    T = ac.W
+    k_dw = getattr(ac, 'k_downwash', 0.0)
+    T = ac.W / (1.0 - k_dw)
 
     # Ideal induced power + correction
     P_i = ac.k_i * T * np.sqrt(T / (2 * rho * ac.rotor_area_total))
@@ -121,7 +124,8 @@ def power_transition(ac: AircraftEnergyParams,
     by rotors).
     """
     rho = isa_density(altitude)
-    T = ac.W  # Approximate: rotors still bearing most weight
+    k_dw = getattr(ac, 'k_downwash', 0.0)
+    T = ac.W / (1.0 - k_dw)  # Approximate: rotors still bearing most weight
 
     # Advance ratio (assuming small α, cos(α) ≈ 1)
     mu = V_inf / ac.V_tip
@@ -257,8 +261,7 @@ def power_fw_descent(ac: AircraftEnergyParams,
     P_c = ac.W * V_inf * np.sin(gamma)
 
     P_mec = P_p - P_c
-    # Minimum power: even in descent, avionics and control surfaces draw power
-    return max(P_mec, 20.0)  # 20 W floor for avionics/servos
+    return P_mec
 
 
 def power_vertical_descent(ac: AircraftEnergyParams,
@@ -277,7 +280,9 @@ def power_vertical_descent(ac: AircraftEnergyParams,
     descent rate is to that band, so a planner can keep out of it.
     """
     rho = isa_density(altitude)
-    T = ac.W  # Controlled descent: T ≈ W
+    # Controlled descent: T = W + download penalty
+    k_dw = getattr(ac, 'k_downwash', 0.0)
+    T = ac.W / (1.0 - k_dw)
 
     V_y_abs = abs(V_y)
 
@@ -881,7 +886,14 @@ def analyze_path_energy(path, ac: AircraftEnergyParams,
         eta = (ac.eta_vtol_effective
                if seg_name in ("VTOL_ASCEND", "VTOL_DESCEND", "TRANSITION")
                else ac.eta_cruise_effective)
-        P_elec = P_mec / eta
+        
+        P_elec_propulsion = P_mec / eta if P_mec > 0 else P_mec * eta
+        # If P_mec < 0 (e.g. descent regeneration), the efficiency applies inversely. 
+        # But for simplicity, we just use / eta for positive power, * eta for regen.
+        
+        # Add continuous avionics base load
+        P_avionics = getattr(ac, 'avionics_power_w', 0.0)
+        P_elec = P_elec_propulsion + P_avionics
 
         # Discharge battery for this segment's duration
         discharge = battery.discharge(P_elec, k.duration)

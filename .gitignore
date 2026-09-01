@@ -28,6 +28,9 @@ data/elevation_cache.npz
 data/TIF_files/output_be.tif
 data/TIF_files/viz.*.tif
 
+# Large raster archives
+data/TIF_files/*.tar.gz
+
 # Measured OCV data, downloaded on demand and CC BY 4.0. Fetch with:
 #   python -m scripts.extract_ocv --all --download
 data/ocv/*.mat
