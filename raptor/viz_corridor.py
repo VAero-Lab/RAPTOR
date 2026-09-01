@@ -1188,9 +1188,9 @@ def plot_drag_breakdown(ac, V: float = 30.0, altitude: float = 2800.0,
 
 def plot_path_3d(paths, labels, dem, ax=None, margin_m: float = 2000.0,
                  title: str = None, decimate: int = None,
-                 elev: float = 32.0, azim: float = -120.0,
+                 elev: float = 30.0, azim: float = -60.0,
                  show_ground_track: bool = True, colour_terrain: bool = True,
-                 simplified=None, number_waypoints: bool = True):
+                 simplified=None, number_waypoints: bool = True, colors=None):
     """
     The routes over the terrain they actually cross, in three dimensions.
 
@@ -1254,18 +1254,17 @@ def plot_path_3d(paths, labels, dem, ax=None, margin_m: float = 2000.0,
         rgb = np.dstack([g, g, g])
 
     ax.plot_surface(LON, LAT, z, facecolors=rgb, rstride=1, cstride=1,
-                    linewidth=0, antialiased=False, shade=False, zorder=1)
+                    linewidth=0, antialiased=False, shade=False, zorder=1, alpha=0.6)
 
     floor = float(np.nanmin(z))
-    cmap = plt.get_cmap("tab10")
-    for i, (arr, label) in enumerate(zip(arrays, labels)):
-        c = cmap(i % 10)
-        ax.plot(arr[:, 1], arr[:, 0], arr[:, 2], lw=2.2, color=c,
+    for arr, label in zip(arrays, labels):
+        c = _label_to_color(label)
+        ax.plot(arr[:, 1], arr[:, 0], arr[:, 2], lw=2.5, color=c,
                 label=label, zorder=6)
         if show_ground_track:
             ax.plot(arr[:, 1], arr[:, 0],
-                    np.full(len(arr), floor), lw=1.0, color=c, alpha=0.45,
-                    zorder=5)
+                    np.full(len(arr), floor), lw=1.2, color=c, alpha=0.45,
+                    zorder=5, linestyle=":")
 
     if simplified is not None:
         wp = np.asarray(simplified.get_waypoints_array(), float)
@@ -1280,14 +1279,22 @@ def plot_path_3d(paths, labels, dem, ax=None, margin_m: float = 2000.0,
                                   ec=C_SIMPLE, lw=0.9, alpha=0.92))
 
     a = arrays[0]
-    ax.scatter([a[0, 1]], [a[0, 0]], [a[0, 2]], s=55, marker="^",
-               color="#1B5E20", edgecolor="white", linewidth=1.2, zorder=9)
-    ax.scatter([a[-1, 1]], [a[-1, 0]], [a[-1, 2]], s=55, marker="s",
-               color="#B71C1C", edgecolor="white", linewidth=1.2, zorder=9)
+    # Origin marker
+    ax.scatter([a[0, 1]], [a[0, 0]], [a[0, 2]], s=75, marker="^",
+               color="#1B5E20", edgecolor="white", linewidth=1.2, zorder=10)
+    ax.text(a[0, 1], a[0, 0], a[0, 2] + 150, "Origin", color="#1B5E20", 
+            fontsize=8, fontweight="bold", zorder=11, ha="center", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#1B5E20", lw=1.0, alpha=0.8))
+            
+    # Destination marker
+    ax.scatter([a[-1, 1]], [a[-1, 0]], [a[-1, 2]], s=75, marker="s",
+               color="#B71C1C", edgecolor="white", linewidth=1.2, zorder=10)
+    ax.text(a[-1, 1], a[-1, 0], a[-1, 2] + 150, "Destination", color="#B71C1C", 
+            fontsize=8, fontweight="bold", zorder=11, ha="center", va="bottom",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#B71C1C", lw=1.0, alpha=0.8))
 
-    ax.set_xlabel("longitude", labelpad=8)
-    ax.set_ylabel("latitude", labelpad=8)
-    ax.set_zlabel("altitude [m AMSL]", labelpad=8)
+    ax.set_axis_off()
+
     ax.set_xlim(lon0, lon1)
     ax.set_ylim(lat0, lat1)
     # Frame the ground and the routes, nothing above them. Matplotlib's
@@ -1304,9 +1311,11 @@ def plot_path_3d(paths, labels, dem, ax=None, margin_m: float = 2000.0,
     # over a 25 km route is a barely visible ripple.
     ax.set_box_aspect((lon1 - lon0, lat1 - lat0,
                        0.55 * max(lat1 - lat0, lon1 - lon0)))
-    ax.legend(fontsize=7, loc="upper left")
+    
+    # Remove the bounding box around the legend since we removed the axes
+    ax.legend(fontsize=8, loc="upper left", frameon=False, bbox_to_anchor=(0.0, 1.0))
     if title:
-        ax.set_title(title, fontsize=11, fontweight="bold")
+        ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
     return ax
 
 
@@ -1316,7 +1325,7 @@ def plot_path_3d(paths, labels, dem, ax=None, margin_m: float = 2000.0,
 
 def plot_optimizer_history(result, routed_path, dem, airspace=None,
                            suptitle: str = None, figsize=(16.0, 6.6),
-                           n_snapshots: int = 6):
+                           n_snapshots: int = 7):
     """
     How the search got there: the routes it tried, and why it moved.
 
@@ -1581,80 +1590,108 @@ def plot_energy_breakdown(energy_result, ax=None, title: str = None):
     of the battery, and that ratio is what makes every extra stop in a
     multi-stop mission expensive.
     """
-def plot_energy_breakdown(energy_result, ax=None, title: str = None):
-    """
-    Where the energy went, by flight phase, against where the time went.
+def _label_to_color(label):
+    """Map a path label to its canonical plan-profile color."""
+    ll = label.lower()
+    if "straight" in ll:
+        return C_STRAIGHT
+    elif "terrain" in ll:
+        return C_TERRAIN_PATH
+    elif "a*" in ll or "grid" in ll:
+        return C_ASTAR
+    else:
+        return "#E53935"  # Red for DGAC Optimized (matches plan-profile)
 
-    Plotted as a radar (spider) plot to instantly show the intensity gap
-    between energy consumption and time spent.
+
+def plot_energy_breakdown(energy_results_with_labels, ax=None, title: str = None):
+    """
+    Energy share by flight phase for multiple path strategies.
+
+    Parameters
+    ----------
+    energy_results_with_labels : list of (label, energy_result)
+        Each entry is a (str, EnergyResult) pair. The label determines
+        the color using the same coding as the plan-profile altitude plots:
+          - Straight Line  → orange (#FF9800)
+          - Terrain-Following → cyan (#00BCD4)
+          - DGAC Optimized → red (#E53935)
+        A* is excluded from the energy comparison per design decision.
+    ax : matplotlib polar Axes, optional
+    title : str, optional
     """
     plt = _mpl()
     if ax is None:
         fig = plt.figure(figsize=(8.0, 8.0))
         ax = fig.add_subplot(111, projection="polar")
 
-    by = {}
-    for seg in energy_result.segments:
-        e = by.setdefault(seg.segment_type, [0.0, 0.0])
-        e[0] += seg.energy_wh
-        e[1] += seg.duration
+    # ── Backwards compatibility: accept a bare EnergyResult ──────────
+    if not isinstance(energy_results_with_labels, list):
+        energy_results_with_labels = [("Optimized", energy_results_with_labels)]
 
-    order = [k for k in PHASE_COLOUR if k in by]
-    e_tot = sum(v[0] for v in by.values()) or 1.0
-    t_tot = sum(v[1] for v in by.values()) or 1.0
-    
-    e_share = [100 * by[k][0] / e_tot for k in order]
-    t_share = [100 * by[k][1] / t_tot for k in order]
-
-    # Calculate angles for the radar chart (and close the loop)
+    # ── Build a unified set of phase categories across all results ────
+    all_phases = set()
+    for _label, er in energy_results_with_labels:
+        for seg in er.segments:
+            all_phases.add(seg.segment_type)
+    order = [k for k in PHASE_COLOUR if k in all_phases]
     N = len(order)
+    if N == 0:
+        return ax
+
     angles = [n / float(N) * 2 * np.pi for n in range(N)]
     angles += angles[:1]
-    
-    e_share += e_share[:1]
-    t_share += t_share[:1]
 
-    # Draw the radar chart
-    ax.set_theta_offset(np.pi / 2)  # Start from top
-    ax.set_theta_direction(-1)      # Clockwise
-    
-    # Draw axes labels
+    # ── Radar styling ────────────────────────────────────────────────
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
     ax.set_xticks(angles[:-1])
-    ax.set_xticklabels([k.replace("_", "\n").lower() for k in order], fontsize=8, fontweight="bold")
-    
-    # Draw y labels
+    ax.set_xticklabels(
+        [k.replace("_", "\n").lower() for k in order],
+        fontsize=8, fontweight="bold")
     ax.set_rlabel_position(0)
-    
-    # Determine the maximum value for the radial axis
-    max_val = max(max(e_share), max(t_share))
-    # Create ticks every 20%, up to the next multiple of 20 above max_val
-    tick_max = int(np.ceil(max_val / 20.0)) * 20
-    ticks = np.arange(20, tick_max + 1, 20)
+
+    # ── Compute energy AND time shares for every path ──────────────────
+    global_max = 0.0
+    traces = []   # [(label, color, e_share_closed, t_share_closed)]
+    for label, er in energy_results_with_labels:
+        by_e = {}
+        by_t = {}
+        for seg in er.segments:
+            by_e[seg.segment_type] = by_e.get(seg.segment_type, 0.0) + seg.energy_wh
+            by_t[seg.segment_type] = by_t.get(seg.segment_type, 0.0) + seg.duration
+        e_tot = sum(by_e.values()) or 1.0
+        t_tot = sum(by_t.values()) or 1.0
+        e_share = [100 * by_e.get(k, 0.0) / e_tot for k in order]
+        t_share = [100 * by_t.get(k, 0.0) / t_tot for k in order]
+        e_closed = e_share + e_share[:1]
+        t_closed = t_share + t_share[:1]
+        global_max = max(global_max, max(e_share), max(t_share))
+        traces.append((label, _label_to_color(label), e_closed, t_closed))
+
+    # ── Logarithmic radial scale ─────────────────────────────────────
+    ax.set_yscale('symlog', linthresh=1.0)
+    ticks = [1, 10, 50, 100]
     ax.set_yticks(ticks)
     ax.set_yticklabels([f"{t}%" for t in ticks], color="grey", size=7)
-    ax.set_ylim(0, tick_max)
+    ax.set_ylim(0, 100)
 
-    # Plot Energy Share
-    ax.plot(angles, e_share, linewidth=2, linestyle='solid', label="Energy Share", color=C_PATH)
-    ax.fill(angles, e_share, color=C_PATH, alpha=0.25)
-    
-    # Plot Time Share
-    ax.plot(angles, t_share, linewidth=1.5, linestyle='--', label="Time Share", color=C_BUST)
-    ax.fill(angles, t_share, color=C_BUST, alpha=0.1)
+    # ── Draw traces (largest energy area at the back) ────────────────
+    traces.sort(key=lambda t: sum(t[2][:-1]), reverse=True)
+    for label, color, e_share, t_share in traces:
+        # Energy share: solid line + subtle fill
+        ax.plot(angles, e_share, linewidth=2, linestyle='solid',
+                label=f"{label} (energy)", color=color)
+        ax.fill(angles, e_share, color=color, alpha=0.15)
+        # Time share: dashed line, no fill
+        ax.plot(angles, t_share, linewidth=1.5, linestyle='--',
+                label=f"{label} (time)", color=color)
 
-    # Add multipliers for intensity (Energy / Time)
-    for i, (e, tm) in enumerate(zip(e_share[:-1], t_share[:-1])):
-        if tm > 0.5:
-            intensity = e / tm
-            if intensity > 1.0:
-                ax.text(angles[i], max(e, tm) + 5, f"×{intensity:.1f}", 
-                        horizontalalignment='center', size=8, color="0.2", weight="bold")
+    ax.legend(loc='upper right', bbox_to_anchor=(1.25, 1.12), fontsize=8,
+              frameon=False)
 
-    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1), fontsize=8)
-    
     if title:
         ax.set_title(title, size=11, fontweight="bold", pad=20)
-        
+
     return ax
 
 

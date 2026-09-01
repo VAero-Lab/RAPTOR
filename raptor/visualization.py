@@ -29,7 +29,9 @@ if TYPE_CHECKING:
     from .routed_path import RoutedPath
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')
+import os
+if os.environ.get('RAPTOR_INTERACTIVE', '0') == '0':
+    matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib import cm, colors as mcolors
 from mpl_toolkits.mplot3d import Axes3D
